@@ -62,4 +62,11 @@ type ProxyConfig struct {
 	AdvertisedPort       int
 	HTTPS                bool
 	User, Password       CredentialString
+	// LDAP authentication fields
+	LDAPEnabled          bool
+	LDAPServer           string
+	LDAPBaseDN           string
+	LDAPBindDN           string
+	LDAPBindPassword     string
+	LDAPUserAttribute    string
 }

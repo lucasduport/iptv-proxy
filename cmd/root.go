@@ -98,6 +98,12 @@ var rootCmd = &cobra.Command{
 			CustomEndpoint:       viper.GetString("custom-endpoint"),
 			CustomId:             viper.GetString("custom-id"),
 			XtreamGenerateApiGet: viper.GetBool("xtream-api-get"),
+			LDAPEnabled:          viper.GetBool("ldap-enabled"),
+			LDAPServer:           viper.GetString("ldap-server"),
+			LDAPBaseDN:           viper.GetString("ldap-base-dn"),
+			LDAPBindDN:           viper.GetString("ldap-bind-dn"),
+			LDAPBindPassword:     viper.GetString("ldap-bind-password"),
+			LDAPUserAttribute:    viper.GetString("ldap-user-attribute"),
 		}
 
 		if conf.AdvertisedPort == 0 {
@@ -146,6 +152,12 @@ func init() {
 	rootCmd.Flags().String("xtream-base-url", "", "Xtream-code base url e.g(http://expample.tv:8080)")
 	rootCmd.Flags().Int("m3u-cache-expiration", 1, "M3U cache expiration in hour")
 	rootCmd.Flags().BoolP("xtream-api-get", "", false, "Generate get.php from xtream API instead of get.php original endpoint")
+	rootCmd.Flags().Bool("ldap-enabled", false, "Enable LDAP authentication")
+	rootCmd.Flags().String("ldap-server", "", "LDAP server address")
+	rootCmd.Flags().String("ldap-base-dn", "", "LDAP base DN")
+	rootCmd.Flags().String("ldap-bind-dn", "", "LDAP bind DN")
+	rootCmd.Flags().String("ldap-bind-password", "", "LDAP bind password")
+	rootCmd.Flags().String("ldap-user-attribute", "uid", "LDAP user attribute (e.g., uid, sAMAccountName)")
 
 	if e := viper.BindPFlags(rootCmd.Flags()); e != nil {
 		log.Fatal("error binding PFlags to viper")

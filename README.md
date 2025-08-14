@@ -2,12 +2,14 @@
 
 [![Actions Status](https://github.com/pierre-emmanuelJ/iptv-proxy/workflows/CI/badge.svg)](https://github.com/pierre-emmanuelJ/iptv-proxy/actions?query=workflow%3ACI)
 
-NOTE: This fork of the [original project](https://github.com/pierre-emmanuelJ/iptv-proxy) contains the following enhancements:
+**About this fork:**  
+This repository is forked from [jtdevops/iptv-proxy](https://github.com/jtdevops/iptv-proxy), which itself is a fork of the [original project](https://github.com/pierre-emmanuelJ/iptv-proxy). The jtdevops fork fixed several parsing bugs (notably with Xtream Codes EPG and VOD parsing).  
+I then further enhanced it with additional features, including LDAP authentication support (see below).
 
-- Corrected issue with Xtream Codes EPG not loading
-- Fixed issue with Xtream Codes VOD (Shows & Movies) as the IPTV provider returned data seems to be partially complete, or missing pieces that this proxy is expecting
-
-
+**Enhancements in this fork:**
+- Based on [jtdevops/iptv-proxy](https://github.com/jtdevops/iptv-proxy) with improved parsing (Xtream Codes EPG/VOD bugs fixed)
+- Further fixes and improvements
+- **LDAP authentication support added by myself**
 
 ## Description
 
@@ -178,7 +180,39 @@ Or
 % docker-compose up -d
 ```
 
+## LDAP Authentication Support
+
+LDAP authentication can be enabled to authenticate users against an LDAP directory. If enabled, local credentials are ignored and only LDAP authentication is used.
+
+**Note:** LDAP support was added by myself in this fork.
+
+### Configuration
+
+Set the following environment variables or configuration options:
+
+- `LDAP_ENABLED`: Set to `true` to enable LDAP authentication.
+- `LDAP_SERVER`: LDAP server URI (e.g., `ldap://ldap.example.com:389`).
+- `LDAP_BASE_DN`: Base DN for user search (e.g., `ou=users,dc=example,dc=com`).
+- `LDAP_BIND_DN`: Bind DN for service account (optional, for searching users).
+- `LDAP_BIND_PASSWORD`: Password for service account (optional).
+- `LDAP_USER_ATTRIBUTE`: LDAP attribute for username (e.g., `uid`).
+
+Example configuration in environment variables:
+
+```env
+LDAP_ENABLED=true
+LDAP_SERVER=ldap://ldap.example.com:389
+LDAP_BASE_DN=ou=users,dc=example,dc=com
+LDAP_BIND_DN=cn=admin,dc=example,dc=com
+LDAP_BIND_PASSWORD=adminpassword
+LDAP_USER_ATTRIBUTE=uid
+```
+
+If LDAP is enabled, users must authenticate with their LDAP username and password.
+
 ## TLS - https with traefik
+
+**Note:** I do not use Traefik myself, but the following instructions are included for reference if you wish to enable HTTPS via Traefik.
 
 Put files and folders of `./traekik` folder in root repo:
 ```Shell
@@ -190,7 +224,6 @@ $ mkdir config \
         && mkdir -p Traefik/etc/traefik \
         && mkdir -p Traefik/log
 ```
-
 
 `docker-compose` sample with traefik:
 ```Yaml

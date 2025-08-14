@@ -32,6 +32,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
+	"gopkg.in/ldap.v3"
 )
 
 func (c *Config) getM3U(ctx *gin.Context) {
@@ -131,13 +132,31 @@ type authRequest struct {
 }
 
 func (c *Config) authenticate(ctx *gin.Context) {
-	utils.DebugLog("-> Incoming URL: %s", ctx.Request.URL) // Or use c.Request.URL.Path for exact request path
-
+	utils.DebugLog("-> Incoming URL: %s", ctx.Request.URL)
 	var authReq authRequest
 	if err := ctx.Bind(&authReq); err != nil {
-		ctx.AbortWithError(http.StatusBadRequest, err) // nolint: errcheck
+		ctx.AbortWithError(http.StatusBadRequest, err)
 		return
 	}
+
+	// LDAP authentication if enabled
+	if c.ProxyConfig.LDAPEnabled {
+		if !ldapAuthenticate(
+			c.ProxyConfig.LDAPServer,
+			c.ProxyConfig.LDAPBaseDN,
+			c.ProxyConfig.LDAPBindDN,
+			c.ProxyConfig.LDAPBindPassword,
+			c.ProxyConfig.LDAPUserAttribute,
+			authReq.Username,
+			authReq.Password,
+		) {
+			ctx.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		return
+	}
+
+	// Fallback to local credentials
 	if c.ProxyConfig.User.String() != authReq.Username || c.ProxyConfig.Password.String() != authReq.Password {
 		ctx.AbortWithStatus(http.StatusUnauthorized)
 	}
@@ -167,4 +186,39 @@ func (c *Config) appAuthenticate(ctx *gin.Context) {
 	}
 
 	ctx.Request.Body = ioutil.NopCloser(bytes.NewReader(contents))
+}
+
+func ldapAuthenticate(server, baseDN, bindDN, bindPassword, userAttr, username, password string) bool {
+	l, err := ldap.DialURL(server)
+	if err != nil {
+		return false
+	}
+	defer l.Close()
+
+	// Bind with service account
+	if bindDN != "" && bindPassword != "" {
+		if err := l.Bind(bindDN, bindPassword); err != nil {
+			return false
+		}
+	}
+
+	// Search for user DN
+	searchRequest := ldap.NewSearchRequest(
+		baseDN,
+		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 1, 0, false,
+		fmt.Sprintf("(%s=%s)", userAttr, ldap.EscapeFilter(username)),
+		[]string{"dn"},
+		nil,
+	)
+	sr, err := l.Search(searchRequest)
+	if err != nil || len(sr.Entries) == 0 {
+		return false
+	}
+	userDN := sr.Entries[0].DN
+
+	// Try to bind as user
+	if err := l.Bind(userDN, password); err != nil {
+		return false
+	}
+	return true
 }
