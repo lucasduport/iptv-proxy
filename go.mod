@@ -1,8 +1,10 @@
 module github.com/pierre-emmanuelJ/iptv-proxy
 
 require (
+	github.com/buger/jsonparser v1.1.1
 	github.com/gin-contrib/cors v0.0.0-20190226021855-50921afdc5c1
 	github.com/gin-gonic/gin v1.9.0
+	github.com/go-ldap/ldap/v3 v3.4.4
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/jamesnetherton/m3u v0.4.0
 	github.com/mitchellh/go-homedir v1.1.0
@@ -10,14 +12,15 @@ require (
 	github.com/spf13/cobra v1.2.1
 	github.com/spf13/viper v1.8.1
 	github.com/tellytv/go.xtream-codes v0.0.0-20220204001149-59925bc76764
-	github.com/buger/jsonparser v1.1.1
 )
 
 require (
+	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358 // indirect
 	github.com/bytedance/sonic v1.8.0 // indirect
 	github.com/chenzhuoyu/base64x v0.0.0-20221115062448-fe3a3abad311 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
+	github.com/go-asn1-ber/asn1-ber v1.5.8-0.20250403174932-29230038a667 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.11.2 // indirect
@@ -43,8 +46,8 @@ require (
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/crypto v0.5.0 // indirect
 	golang.org/x/net v0.7.0 // indirect
-	golang.org/x/sys v0.5.0 // indirect
-	golang.org/x/text v0.7.0 // indirect
+	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 	google.golang.org/protobuf v1.28.1 // indirect
 	gopkg.in/ini.v1 v1.62.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect

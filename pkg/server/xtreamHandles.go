@@ -39,7 +39,6 @@ import (
 	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
 	xtreamapi "github.com/pierre-emmanuelJ/iptv-proxy/pkg/xtream-proxy"
 	uuid "github.com/satori/go.uuid"
-	xtream "github.com/tellytv/go.xtream-codes"
 )
 
 type cacheMeta struct {
@@ -329,7 +328,7 @@ func hasFieldsField(item interface{}) bool {
 	}
 
 	// Check for specific fields, e.g., "Fields"
-	fieldValue := respValue.FieldByName(xtream.StructFields)
+	fieldValue := respValue.FieldByName("Fields")
 	return fieldValue.IsValid() && !fieldValue.IsNil()
 }
 
@@ -345,7 +344,7 @@ func processXtreamStruct(item interface{}) interface{} {
 			respValue = respValue.Elem()
 		}
 
-		fieldValue := respValue.FieldByName(xtream.StructFields)
+		fieldValue := respValue.FieldByName("Fields")
 		if fieldValue.IsValid() && !fieldValue.IsNil() {
 
 			if fieldValue.Kind() == reflect.Slice && fieldValue.Type().Elem().Kind() == reflect.Uint8 {

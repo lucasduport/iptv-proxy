@@ -32,7 +32,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
-	"gopkg.in/ldap.v3"
+	"github.com/go-ldap/ldap/v3"
 )
 
 func (c *Config) getM3U(ctx *gin.Context) {

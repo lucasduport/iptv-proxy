@@ -1,3 +1,6 @@
+# github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358
+## explicit
+github.com/Azure/go-ntlmssp
 # github.com/buger/jsonparser v1.1.1
 ## explicit; go 1.13
 github.com/buger/jsonparser
@@ -41,6 +44,12 @@ github.com/gin-gonic/gin/binding
 github.com/gin-gonic/gin/internal/bytesconv
 github.com/gin-gonic/gin/internal/json
 github.com/gin-gonic/gin/render
+# github.com/go-asn1-ber/asn1-ber v1.5.8-0.20250403174932-29230038a667
+## explicit; go 1.13
+github.com/go-asn1-ber/asn1-ber
+# github.com/go-ldap/ldap/v3 v3.4.4
+## explicit; go 1.14
+github.com/go-ldap/ldap/v3
 # github.com/go-playground/locales v0.14.1
 ## explicit; go 1.17
 github.com/go-playground/locales
@@ -172,6 +181,7 @@ github.com/ugorji/go/codec
 golang.org/x/arch/x86/x86asm
 # golang.org/x/crypto v0.5.0
 ## explicit; go 1.17
+golang.org/x/crypto/md4
 golang.org/x/crypto/sha3
 # golang.org/x/net v0.7.0
 ## explicit; go 1.17
@@ -180,12 +190,12 @@ golang.org/x/net/http2
 golang.org/x/net/http2/h2c
 golang.org/x/net/http2/hpack
 golang.org/x/net/idna
-# golang.org/x/sys v0.5.0
-## explicit; go 1.17
+# golang.org/x/sys v0.31.0
+## explicit; go 1.23
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
-# golang.org/x/text v0.7.0
-## explicit; go 1.17
+# golang.org/x/text v0.23.0
+## explicit; go 1.23
 golang.org/x/text/internal/language
 golang.org/x/text/internal/language/compact
 golang.org/x/text/internal/tag
