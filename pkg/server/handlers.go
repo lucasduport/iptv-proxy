@@ -82,32 +82,44 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	c.stream(ctx, rpURL)
 }
 
+// stream handles proxying the actual stream content from the upstream source
+// to the requesting client, preserving headers and status codes
 func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 	utils.DebugLog("-> Streaming request URL: %s", ctx.Request.URL)
 	utils.DebugLog("-> Proxying to upstream URL: %s", oriURL.String())
 
-	client := &http.Client{}
+	// Configure HTTP client with reasonable timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
 
+	// Prepare the upstream request
 	req, err := http.NewRequest("GET", oriURL.String(), nil)
 	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
+		utils.ErrorLog("Failed to create request: %v", err)
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
 
+	// Copy relevant headers from the original request
 	mergeHttpHeader(req.Header, ctx.Request.Header)
 
+	// Execute the upstream request
 	resp, err := client.Do(req)
 	if err != nil {
 		utils.DebugLog("-> Upstream request error: %v", err)
-		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
 	defer resp.Body.Close()
 
 	utils.DebugLog("-> Upstream response status: %d", resp.StatusCode)
 	
+	// Copy response headers and status code
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
 	ctx.Status(resp.StatusCode)
+	
+	// Stream the response body to the client
 	ctx.Stream(func(w io.Writer) bool {
 		io.Copy(w, resp.Body) // nolint: errcheck
 		return false

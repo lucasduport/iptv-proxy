@@ -55,19 +55,25 @@ type Config struct {
 	endpointAntiColision string
 }
 
-// NewServer initialize a new server configuration
+// NewServer initializes a new server configuration with all necessary components
 func NewServer(config *config.ProxyConfig) (*Config, error) {
 	var p m3u.Playlist
+	
+	// Parse the M3U playlist from the remote URL if provided
 	if config.RemoteURL.String() != "" {
 		var err error
 		p, err = m3u.Parse(config.RemoteURL.String())
 		if err != nil {
-			return nil, err
+			return nil, utils.PrintErrorAndReturn(err)
 		}
+		utils.InfoLog("Successfully parsed M3U playlist from %s", config.RemoteURL.String())
 	}
 
+	// Use custom ID for endpoint if provided, otherwise use a generated one
+	customID := endpointAntiColision
 	if trimmedCustomId := strings.Trim(config.CustomId, "/"); trimmedCustomId != "" {
-		endpointAntiColision = trimmedCustomId
+		customID = trimmedCustomId
+		utils.InfoLog("Using custom endpoint ID: %s", customID)
 	}
 
 	// Initialize debug logging from environment variable
@@ -78,7 +84,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		&p,
 		nil,
 		defaultProxyfiedM3UPath,
-		endpointAntiColision,
+		customID,
 	}, nil
 }
 

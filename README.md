@@ -1,319 +1,163 @@
-# Iptv Proxy
+# IPTV Proxy Server with LDAP Authentication
 
-[![Actions Status](https://github.com/pierre-emmanuelJ/iptv-proxy/workflows/CI/badge.svg)](https://github.com/pierre-emmanuelJ/iptv-proxy/actions?query=workflow%3ACI)
+## Overview
 
-**About this fork:**  
-This repository is forked from [jtdevops/iptv-proxy](https://github.com/jtdevops/iptv-proxy), which itself is a fork of the [original project](https://github.com/pierre-emmanuelJ/iptv-proxy). The jtdevops fork fixed several parsing bugs (notably with Xtream Codes EPG and VOD parsing).  
-I then further enhanced it with additional features, including LDAP authentication support (see below).
+This project is a feature-rich IPTV proxy server with LDAP authentication, based on [jtdevops/iptv-proxy](https://github.com/jtdevops/iptv-proxy) (itself a fork of [pierre-emmanuelJ/iptv-proxy](https://github.com/pierre-emmanuelJ/iptv-proxy)). It fixes parsing bugs (Xtream Codes EPG/VOD) and adds LDAP authentication.
 
-**Enhancements in this fork:**
-- Based on [jtdevops/iptv-proxy](https://github.com/jtdevops/iptv-proxy) with improved parsing (Xtream Codes EPG/VOD bugs fixed)
-- Further fixes and improvements
-- **LDAP authentication support added by myself**
+### Key Features
 
-## Description
+- Xtream Codes EPG/VOD parsing fixes
+- M3U/M3U8 playlist proxying
+- Xtream Codes client API proxying (live, VOD, series, EPG)
+- **LDAP authentication support**
+- Docker-ready deployment
 
-Iptv-Proxy is a project to proxyfie an m3u file
-and to proxyfie an Xtream iptv service (client API).
+---
 
-### M3U and M3U8
+## How It Works
 
-M3U service convert an iptv m3u file into a web proxy server.
+### M3U/M3U8 Proxy
 
-It's transform all the original tracks to an new url pointing on the proxy.
+The proxy transforms original IPTV playlist URLs into endpoints on your proxy server, securing access via authentication.
 
-
-### Xtream code client api
-
-proxy on Xtream code (client API)
-
-support live, vod, series and full epg :rocket:
-
-> **Important:**  
-> All backend queries to the Xtream API (live, vod, series, etc.) always use the Xtream credentials (`xtream-user`, `xtream-password`, `xtream-base-url`) from environment variables or config file.  
-> The proxy/LDAP user credentials are only used for authenticating access to the proxy, **never for backend Xtream API requests**.
-
-### M3u Example
-
-Original iptv m3u file
-
+**Original M3U Example:**
 ```m3u
 #EXTM3U
 #EXTINF:-1 tvg-ID="examplechanel1.com" tvg-name="chanel1" tvg-logo="http://ch.xyz/logo1.png" group-title="USA HD",CHANEL1-HD
 http://iptvexample.net:1234/12/test/1
-#EXTINF:-1 tvg-ID="examplechanel2.com" tvg-name="chanel2" tvg-logo="http://ch.xyz/logo2.png" group-title="USA HD",CHANEL2-HD
-http://iptvexample.net:1234/13/test/2
-#EXTINF:-1 tvg-ID="examplechanel3.com" tvg-name="chanel3" tvg-logo="http://ch.xyz/logo3.png" group-title="USA HD",CHANEL3-HD
-http://iptvexample.net:1234/14/test/3
-#EXTINF:-1 tvg-ID="examplechanel4.com" tvg-name="chanel4" tvg-logo="http://ch.xyz/logo4.png" group-title="USA HD",CHANEL4-HD
-http://iptvexample.net:1234/15/test/4
 ```
 
-What M3U proxy IPTV do
- - convert chanels url to new endpoints
- - convert original m3u file with new routes pointing to the proxy
-
-Start proxy server example
-
-```Bash
-iptv-proxy --m3u-url http://example.com/get.php?username=user&password=pass&type=m3u_plus&output=m3u8 \
-             --port 8080 \
-             --hostname proxyexample.com \
-             --user test \
-             --password passwordtest
-```
-
-
- That's give you an m3u file on a specific endpoint `iptv.m3u` in our example
- 
- `http://proxyserver.com:8080/iptv.m3u?username=test&password=passwordtest`
-
-All the new routes pointing on your proxy server
+**Proxied Output:**
 ```m3u
 #EXTM3U
 #EXTINF:-1 tvg-ID="examplechanel1.com" tvg-name="chanel1" tvg-logo="http://ch.xyz/logo1.png" group-title="USA HD",CHANEL1-HD
 http://proxyserver.com:8080/12/test/1?username=test&password=passwordtest
-#EXTINF:-1 tvg-ID="examplechanel2.com" tvg-name="chanel2" tvg-logo="http://ch.xyz/logo2.png" group-title="USA HD",CHANEL2-HD
-http://proxyserver.com:8080/13/test/2?username=test&password=passwordtest
-#EXTINF:-1 tvg-ID="examplechanel3.com" tvg-name="chanel3" tvg-logo="http://ch.xyz/logo3.png" group-title="USA HD",CHANEL3-HD
-http://proxyserver.com:8080/14/test/3?username=test&password=passwordtest
-#EXTINF:-1 tvg-ID="examplechanel4.com" tvg-name="chanel4" tvg-logo="http://ch.xyz/logo4.png" group-title="USA HD",CHANEL4-HD
-http://proxyserver.com:8080/15/test/4?username=test&password=passwordtest
 ```
 
-### M3u8 Example
+**Start Example:**
+```bash
+iptv-proxy --m3u-url http://example.com/get.php?username=user&password=pass&type=m3u_plus&output=m3u8 \
+       --port 8080 \
+       --hostname proxyexample.com \
+       --user test \
+       --password passwordtest
+```
+Access your playlist at:  
+`http://proxyserver.com:8080/iptv.m3u?username=test&password=passwordtest`
 
-The m3u8 feature is like m3u.
-The playlist should be in the m3u format and should contain all m3u8 tracks.
+### Xtream Codes API Proxy
 
-Sample of the original m3u file containing m3u8 track:
-```Shell
-#EXTM3U
-#EXTINF:-1 tvg-ID="examplechanel1.com" tvg-name="chanel1" tvg-logo="http://ch.xyz/logo1.png" group-title="USA HD",CHANEL1-HD
-http://iptvexample.net:1234/12/test/1.m3u8
-#EXTINF:-1 tvg-ID="examplechanel2.com" tvg-name="chanel2" tvg-logo="http://ch.xyz/logo2.png" group-title="USA HD",CHANEL2-HD
-http://iptvexample.net:1234/13/test/2.m3u8
+Proxy all Xtream Codes API endpoints (live, VOD, series, EPG) using your proxy credentials.
+
+**Start Example:**
+```bash
+iptv-proxy --m3u-url http://example.com:1234/get.php?username=user&password=pass&type=m3u_plus&output=m3u8 \
+       --port 8080 \
+       --hostname proxyexample.com \
+       --xtream-user xtream_user \
+       --xtream-password xtream_password \
+       --xtream-base-url http://example.com:1234 \
+       --user test \
+       --password passwordtest
 ```
 
-### Xtream code client API example
-
-```Bash
-% iptv-proxy --m3u-url http://example.com:1234/get.php?username=user&password=pass&type=m3u_plus&output=m3u8 \
-             --port 8080 \
-             --hostname proxyexample.com \
-             ## put xtream flags if you want to add xtream proxy
-             --xtream-user xtream_user \
-             --xtream-password xtream_password \
-             --xtream-base-url http://example.com:1234 \
-             --user test \
-             --password passwordtest
-             
+**Proxied Xtream Credentials:**
 ```
-
-What Xtream proxy do
-
- - convert xtream `xtream-user ` and `xtream-password` into new `user` and `password`
- - convert `xtream-base-url` with `hostname` and `port`
- 
-Original xtream credentials
- 
- ```
- user: xtream_user
- password: xtream_password
- base-url: http://example.com:1234
- ```
- 
-New xtream credentials
-
- ```
- user: test
- password: passwordtest
- base-url: http://proxyexample.com:8080
- ```
- 
- All xtream live, streams, vod, series... are proxyfied! 
- 
- 
- You can get the m3u file with the original Xtream api request:
- ```
- http://proxyexample.com:8080/get.php?username=test&password=passwordtest&type=m3u_plus&output=ts
- ```
-
-
-## Installation
-
-Download lasted [release](https://github.com/pierre-emmanuelJ/iptv-proxy/releases)
-
-Or
-
-`% go install` in root repository
-
-## With Docker
-
-### Prerequisite
-
- - Add an m3u URL in `docker-compose.yml` or add local file in `iptv` folder
- - `HOSTNAME` and `PORT` to expose
- - Expose same container port as the `PORT` ENV variable 
-
-```Yaml
- ports:
-       # have to be the same as ENV variable PORT
-      - 8080:8080
- environment:
-      # if you are using m3u remote file
-      # M3U_URL: http://example.com:1234/get.php?username=user&password=pass&type=m3u_plus&output=m3u8
-      M3U_URL: /root/iptv/iptv.m3u
-      # Port to expose the IPTVs endpoints
-      PORT: 8080
-      # Hostname or IP to expose the IPTVs endpoints (for machine not for docker)
-      HOSTNAME: localhost
-      GIN_MODE: release
-      ## Xtream-code proxy configuration
-      ## (put these env variables if you want to add xtream proxy)
-      XTREAM_USER: xtream_user
-      XTREAM_PASSWORD: xtream_password
-      XTREAM_BASE_URL: "http://example.com:1234"
-      USER: test
-      PASSWORD: testpassword
+user: test
+password: passwordtest
+base-url: http://proxyexample.com:8080
 ```
+Access the playlist:  
+`http://proxyexample.com:8080/get.php?username=test&password=passwordtest&type=m3u_plus&output=ts`
 
-### Start
+---
 
-```
-% docker-compose up -d
-```
+## Full Docker Compose Example
 
-## LDAP Authentication Support
+Below is a complete `docker-compose.yml` configuration for running the IPTV Proxy with LDAP authentication.  
+Comments explain which settings are required, optional, and how each part works.
 
-LDAP authentication can be enabled to authenticate users against an LDAP directory. If enabled, local credentials are ignored and only LDAP authentication is used.
-
-> **Important:**  
-> All backend queries to the Xtream API (live, vod, series, etc.) always use the Xtream credentials (`xtream-user`, `xtream-password`, `xtream-base-url`) from environment variables or config file.  
-> The proxy/LDAP user credentials are only used for authenticating access to the proxy, **never for backend Xtream API requests**.
-
-### Configuration
-
-Set the following environment variables or configuration options:
-
-- `LDAP_ENABLED`: Set to `true` to enable LDAP authentication.
-- `LDAP_SERVER`: LDAP server URI (e.g., `ldap://ldap.example.com:389`).
-- `LDAP_BASE_DN`: Base DN for user search (e.g., `ou=users,dc=example,dc=com`).
-- `LDAP_BIND_DN`: Bind DN for service account (optional, for searching users).
-- `LDAP_BIND_PASSWORD`: Password for service account (optional).
-- `LDAP_USER_ATTRIBUTE`: LDAP attribute for username (e.g., `uid`).
-- `LDAP_GROUP_ATTRIBUTE`: LDAP attribute for group membership (e.g., `memberOf`).
-- `LDAP_REQUIRED_GROUP`: Required group for authentication (default: `iptv`).
-
-Example configuration in environment variables:
-
-```env
-LDAP_ENABLED=true
-LDAP_SERVER=ldap://ldap.example.com:389
-LDAP_BASE_DN=ou=users,dc=example,dc=com
-LDAP_BIND_DN=cn=admin,dc=example,dc=com
-LDAP_BIND_PASSWORD=adminpassword
-LDAP_USER_ATTRIBUTE=uid
-LDAP_GROUP_ATTRIBUTE=memberOf
-LDAP_REQUIRED_GROUP=iptv
-```
-
-If LDAP is enabled:
-1. Users must authenticate with their LDAP username and password
-2. Users must be members of the specified group (default: "iptv")
-3. All upstream requests will **always** use the Xtream credentials configured in the environment variables
-
-## TLS - https with traefik
-
-**Note:** I do not use Traefik myself, but the following instructions are included for reference if you wish to enable HTTPS via Traefik.
-
-Put files and folders of `./traekik` folder in root repo:
-```Shell
-$ cp -r ./traekik/* .
-```
-
-```Shell
-$ mkdir config \
-        && mkdir -p Traefik/etc/traefik \
-        && mkdir -p Traefik/log
-```
-
-`docker-compose` sample with traefik:
-```Yaml
-version: "3"
+```yaml
 services:
   iptv-proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    volumes:
-      # If your are using local m3u file instead of m3u remote file
-      # put your m3u file in this folder
-      - ./iptv:/root/iptv
-    container_name: "iptv-proxy"
-    restart: on-failure
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.iptv-proxy.rule=Host(`iptv.proxyexample.xyz`)"
-      - "traefik.http.routers.iptv-proxy.entrypoints=websecure"
-      - "traefik.http.routers.iptv-proxy.tls.certresolver=mydnschallenge"
-      - "traefik.http.services.iptv-proxy.loadbalancer.server.port=8080"
-    environment:
-      # if you are using m3u remote file
-      # M3U_URL: https://example.com/iptvfile.m3u
-      M3U_URL: /root/iptv/iptv.m3u
-      # Iptv-Proxy listening port
-      PORT: 8080
-      # Port to expose for Xtream or m3u file tracks endpoint
-      ADVERTISED_PORT: 443
-      # Hostname or IP to expose the IPTVs endpoints (for machine not for docker)
-      HOSTNAME: iptv.proxyexample.xyz
-      GIN_MODE: release
-      # Inportant to activate https protocol on proxy links
-      HTTPS: 1
-      ## Xtream-code proxy configuration
-      XTREAM_USER: xtream_user
-      XTREAM_PASSWORD: xtream_password
-      XTREAM_BASE_URL: "http://example.tv:1234"
-      #will be used for m3u and xtream auth proxy
-      USER: test
-      PASSWORD: testpassword
-
-  traefik:
-    restart: always
-    image: traefik:v2.4
-    read_only: true
+    image: lucasduport/iptv-proxy:latest  # Use the latest image from Docker Hub
+    container_name: iptv-proxy
+    restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "8080:8080"  # Expose port 8080 (change if needed)
+    environment:
+      # --- REQUIRED SETTINGS ---
+      M3U_URL: "http://example.com/playlist.m3u"  # Source playlist URL (required)
+      PORT: 8080                                  # Internal proxy port (should match 'ports')
+      HOSTNAME: "my-iptv-proxy.example.com"        # Public hostname for proxied URLs
+
+      # --- OPTIONAL / RECOMMENDED SETTINGS ---
+      ADVERTISED_PORT: 443                        # Set to 443 if behind HTTPS reverse proxy
+      GIN_MODE: release                           # Use 'release' for production, 'debug' for development
+      HTTPS: 1                                    # Set to 1 if using HTTPS
+
+      # --- XTREAM CODES BACKEND (REQUIRED for API proxying) ---
+      XTREAM_USER: "provider_username"             # Xtream Codes backend username
+      XTREAM_PASSWORD: "provider_password"         # Xtream Codes backend password
+      XTREAM_BASE_URL: "http://provider.example.com:1234"  # Xtream Codes backend URL
+
+      # --- LOCAL/BASIC AUTH (if LDAP not enabled) ---
+      USER: "local_user"                          # Local username (used if LDAP is disabled)
+      PASSWORD: "local_password"                  # Local password (used if LDAP is disabled)
+
+      # --- LDAP AUTHENTICATION (enable for LDAP login) ---
+      LDAP_ENABLED: "true"                        # Set to "true" to enable LDAP authentication
+      LDAP_SERVER: "ldap://ldap.example.com:389"  # LDAP server URL
+      LDAP_BASE_DN: "ou=people,dc=example,dc=com" # Base DN for user search
+      LDAP_BIND_DN: "uid=admin,ou=people,dc=example,dc=com" # Bind DN for LDAP admin
+      LDAP_BIND_PASSWORD: "admin_password"        # Bind password for LDAP admin
+      LDAP_USER_ATTRIBUTE: "uid"                  # LDAP attribute for username lookup
+      LDAP_GROUP_ATTRIBUTE: "memberOf"            # LDAP attribute for group membership
+      LDAP_REQUIRED_GROUP: "iptv"                 # Require users to be in this group
+
+      # --- DEBUGGING ---
+      DEBUG_LOGGING: "true"                       # Set to "false" for production
+
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./Traefik/traefik.yaml:/traefik.yaml:ro
-      - ./Traefik/etc/traefik:/etc/traefik/
-      - ./Traefik/log:/var/log/traefik/
+      - iptv_config:/root/.iptv-proxy             # Persist config/cache data
+
+volumes:
+  iptv_config:
 ```
 
-Replace `iptv.proxyexample.xyz` in `docker-compose.yml` with your desired domain.
+**How it works:**
+- The proxy container starts and loads environment variables for configuration.
+- If `LDAP_ENABLED` is `"true"`, users must authenticate via LDAP (all LDAP settings required).
+- If `LDAP_ENABLED` is not set or `"false"`, local `USER` and `PASSWORD` are used for basic authentication.
+- Xtream Codes settings are required for API proxying (live, VOD, series, EPG).
+- Playlist and API endpoints are exposed on the configured port.
+- Persistent data (config, cache) is stored in the named Docker volume.
 
-```Shell
-$ docker-compose up -d
-```
+**Tip:**  
+Remove or comment out LDAP settings if you do not use LDAP authentication.  
+Set `DEBUG_LOGGING` to `"false"` for production deployments.
 
-## TODO
+### Notes
 
-there is basic auth just for testing.
-change with a real auth with database and user management
-and auth with token...
+- **Xtream API Credentials:** All backend queries use `XTREAM_USER`, `XTREAM_PASSWORD`, and `XTREAM_BASE_URL`.
+- **Authentication:** Set `LDAP_ENABLED` to `"true"` for LDAP authentication, otherwise basic auth is used.
+- **Performance:** Set `DEBUG_LOGGING: "false"` for production.
+- **HTTPS:** If behind a reverse proxy, set `ADVERTISED_PORT` to 443 and `HTTPS` to 1.
 
-**ENJOY!**
+---
 
-## Powered by
+## Powered By
 
-- [cobra](https://github.com/spf13/cobra)
-- [go.xtream-codes](https://github.com/tellytv/go.xtream-codes)
-- [gin](https://github.com/gin-gonic/gin)
+- [go-ldap/ldap](https://github.com/go-ldap/ldap)
+- [spf13/cobra](https://github.com/spf13/cobra)
+- [tellytv/go.xtream-codes](https://github.com/tellytv/go.xtream-codes)
+- [gin-gonic/gin](https://github.com/gin-gonic/gin)
 
-Grab me a beer 🍻
+---
 
-[![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/donate?hosted_button_id=WQAAMQWJPKHUN)
+## Support
+
+If you find this project useful, consider buying me a beer 🍻
+
+[![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.me/lucasdup135)
 
