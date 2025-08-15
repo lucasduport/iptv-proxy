@@ -2,17 +2,48 @@ package utils
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
 )
 
-func WriteResponseToFile(ctx *gin.Context, resp interface{}, contentType string, optionalURL ...string) {
-	WriteResponseToFileWithOverwrite(ctx, resp, false, contentType, optionalURL...)
+// WriteResponseToFile saves API responses to files for debugging
+func WriteResponseToFile(ctx *gin.Context, data []byte, contentType string) {
+	// Extract path from URL for use in filename
+	path := ctx.Request.URL.Path
+	query := ctx.Request.URL.RawQuery
+
+	// Clean up path for filename
+	cleanPath := strings.ReplaceAll(path, "/", "_")
+	if query != "" {
+		// Add abbreviated query to filename
+		if len(query) > 50 {
+			query = query[:50] + "..."
+		}
+		cleanPath += "_" + strings.ReplaceAll(query, "&", "_")
+	}
+
+	// Ensure filename is not too long
+	if len(cleanPath) > 100 {
+		cleanPath = cleanPath[:100]
+	}
+
+	// Create timestamp
+	timestamp := time.Now().Format("20060102_150405")
+
+	// Create filename
+	filename := filepath.Join(config.CacheFolder, fmt.Sprintf("%s_%s.json", timestamp, cleanPath))
+
+	// Write data to file
+	ioutil.WriteFile(filename, data, 0644)
+	DebugLog("Response saved to file: %s", filename)
 }
 
 func WriteResponseToFileWithOverwrite(ctx *gin.Context, resp interface{}, overwrite bool, contentType string, optionalURL ...string) {

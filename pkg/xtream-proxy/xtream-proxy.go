@@ -20,6 +20,7 @@ package xtreamproxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -227,4 +228,53 @@ func validateParams(u url.Values, params ...string) (int, error) {
 	}
 
 	return 0, nil
+}
+
+// FFMPEGStreamInfo represents the stream info
+type FFMPEGStreamInfo struct {
+	Bitrate    int         `json:"bitrate"`
+	Width      int         `json:"width"`
+	Height     int         `json:"height"`
+	Video      interface{} `json:"video"` // Changed to interface{} to handle both array and struct
+	Audio      interface{} `json:"audio"` // Also changed for consistency
+	Duration   string      `json:"duration"`
+	MediaFile  string      `json:"mediafile"`
+	StreamFile string      `json:"stream_file"`
+	Fields     []byte      `json:"-"` // Raw JSON data
+}
+
+// UnmarshalJSON provides custom JSON unmarshaling to handle different response formats
+func (f *FFMPEGStreamInfo) UnmarshalJSON(data []byte) error {
+	// Store raw JSON data
+	f.Fields = make([]byte, len(data))
+	copy(f.Fields, data)
+
+	// Create a temporary struct with interface{} types for flexible parsing
+	type TempInfo struct {
+		Bitrate    int         `json:"bitrate"`
+		Width      int         `json:"width"`
+		Height     int         `json:"height"`
+		Video      interface{} `json:"video"` // Can be array or struct
+		Audio      interface{} `json:"audio"` // Can be array or struct
+		Duration   string      `json:"duration"`
+		MediaFile  string      `json:"mediafile"`
+		StreamFile string      `json:"stream_file"`
+	}
+
+	var temp TempInfo
+	if err := json.Unmarshal(data, &temp); err != nil {
+		return err
+	}
+
+	// Copy the successfully parsed fields
+	f.Bitrate = temp.Bitrate
+	f.Width = temp.Width
+	f.Height = temp.Height
+	f.Video = temp.Video
+	f.Audio = temp.Audio
+	f.Duration = temp.Duration
+	f.MediaFile = temp.MediaFile
+	f.StreamFile = temp.StreamFile
+
+	return nil
 }

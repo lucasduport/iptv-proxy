@@ -286,7 +286,6 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 
 // ProcessResponse processes various types of xtream-codes responses
 func ProcessResponse(resp interface{}) interface{} {
-
 	respType := reflect.TypeOf(resp)
 
 	switch {
@@ -677,5 +676,6 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 		return
 	}
 
+	ctx.Status(resp.StatusCode)
 	ctx.Status(resp.StatusCode)
 }
