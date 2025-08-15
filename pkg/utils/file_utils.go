@@ -59,7 +59,6 @@ func WriteResponseToFile(ctx *gin.Context, data []byte, contentType string) {
 		return
 	}
 	
-	// Fix: Removed 'utils.' prefix since we're in the utils package
 	DebugLog("Response saved to file: %s", filename)
 }
 
@@ -125,10 +124,8 @@ func WriteResponseToFileWithOverwrite(ctx *gin.Context, resp interface{}, overwr
 			log.Printf("Error writing to file: %v", err)
 		} else {
 			if fileExists {
-				// Fix: Removed 'utils.' prefix since we're in the utils package
 				DebugLog("File overwritten: %s", filename)
 			} else {
-				// Fix: Removed 'utils.' prefix since we're in the utils package
 				DebugLog("Response written to new file: %s", filename)
 			}
 		}

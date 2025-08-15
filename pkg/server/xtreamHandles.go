@@ -286,16 +286,26 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 
 // ProcessResponse processes various types of xtream-codes responses
 func ProcessResponse(resp interface{}) interface{} {
+	if resp == nil {
+		return nil
+	}
+
 	respType := reflect.TypeOf(resp)
+	utils.DebugLog("Processing response of type: %v", respType)
 
 	switch {
 	case respType == nil:
 		return resp
-	case strings.Contains(respType.String(), "[]xtreamcodes."):
+	case strings.Contains(respType.String(), "[]xtream"):
 		return processXtreamArray(resp)
-	case strings.Contains(respType.String(), "xtreamcodes."):
+	case strings.Contains(respType.String(), "xtream"):
+		return processXtreamStruct(resp)
+	case strings.Contains(respType.String(), "VideoOnDemandInfo"):
+		// Special handling for VideoOnDemandInfo which contains FFMPEGStreamInfo
+		utils.DebugLog("Processing VideoOnDemandInfo specifically")
 		return processXtreamStruct(resp)
 	default:
+		utils.DebugLog("No special processing for type: %v", respType)
 	}
 	return resp
 }
@@ -329,18 +339,97 @@ func hasFieldsField(item interface{}) bool {
 	if respValue.Kind() == reflect.Ptr {
 		respValue = respValue.Elem()
 	}
+	
+	// Make sure we're dealing with a struct
+	if respValue.Kind() != reflect.Struct {
+		return false
+	}
 
 	// Check for specific fields, e.g., "Fields"
 	fieldValue := respValue.FieldByName("Fields")
-	return fieldValue.IsValid() && !fieldValue.IsNil()
+	return fieldValue.IsValid() && fieldValue.CanInterface() && !fieldValue.IsZero()
 }
 
 func isXtreamCodesStruct(item interface{}) bool {
+	if item == nil {
+		return false
+	}
+	
 	respType := reflect.TypeOf(item)
-	return respType != nil && strings.Contains(respType.String(), "xtreamcodes.") && hasFieldsField(item)
+	if respType == nil {
+		return false
+	}
+	
+	typeStr := respType.String()
+	
+	// Check if it's an xtreamcodes type or contains FFMPEGStreamInfo
+	isXtreamType := strings.Contains(typeStr, "xtreamcodes.") || 
+	                strings.Contains(typeStr, "xtreamapi.") ||
+	                strings.Contains(typeStr, "*xtream.") ||
+	                strings.Contains(typeStr, "FFMPEGStreamInfo") ||
+	                strings.Contains(typeStr, "VideoOnDemandInfo")
+	
+	// If it's a known Xtream type, we first check for Fields
+	if isXtreamType && hasFieldsField(item) {
+		return true
+	}
+	
+	// Special check for VideoOnDemandInfo which has Info that contains FFMPEGStreamInfo
+	if strings.Contains(typeStr, "VideoOnDemandInfo") {
+		utils.DebugLog("Found VideoOnDemandInfo, special handling needed")
+		return true
+	}
+	
+	return false
 }
 
 func processXtreamStruct(item interface{}) interface{} {
+	if item == nil {
+		return nil
+	}
+	
+	respType := reflect.TypeOf(item)
+	if respType == nil {
+		return item
+	}
+	
+	// Log the type we're processing for debugging
+	utils.DebugLog("Processing struct of type: %v", respType)
+	
+	// Special handling for VideoOnDemandInfo which contains FFMPEGStreamInfo
+	if strings.Contains(respType.String(), "VideoOnDemandInfo") {
+		utils.DebugLog("Special handling for VideoOnDemandInfo")
+		
+		// Extract the raw JSON if available
+		respValue := reflect.ValueOf(item)
+		if respValue.Kind() == reflect.Ptr {
+			respValue = respValue.Elem()
+		}
+		
+		fieldValue := respValue.FieldByName("Fields")
+		if fieldValue.IsValid() && fieldValue.CanInterface() && !fieldValue.IsZero() {
+			// If we have raw Fields data, unmarshal directly to a map to avoid struct constraints
+			if fieldValue.Kind() == reflect.Slice && fieldValue.Type().Elem().Kind() == reflect.Uint8 {
+				var rawMap map[string]interface{}
+				err := json.Unmarshal(fieldValue.Interface().([]byte), &rawMap)
+				if err != nil {
+					utils.DebugLog("Error unmarshaling VideoOnDemandInfo: %v", err)
+					return item
+				}
+				
+				// Special handling for info.video when it's an array
+				if info, ok := rawMap["info"].(map[string]interface{}); ok {
+					if video, exists := info["video"]; exists {
+						utils.DebugLog("Found info.video of type: %T", video)
+					}
+				}
+				
+				return rawMap
+			}
+		}
+	}
+	
+	// Standard processing for Xtream structs with Fields
 	if isXtreamCodesStruct(item) {
 		respValue := reflect.ValueOf(item)
 		if respValue.Kind() == reflect.Ptr {
@@ -348,14 +437,14 @@ func processXtreamStruct(item interface{}) interface{} {
 		}
 
 		fieldValue := respValue.FieldByName("Fields")
-		if fieldValue.IsValid() && !fieldValue.IsNil() {
-
+		if fieldValue.IsValid() && fieldValue.CanInterface() && !fieldValue.IsZero() {
+			// Check if Fields is a byte array
 			if fieldValue.Kind() == reflect.Slice && fieldValue.Type().Elem().Kind() == reflect.Uint8 {
 				var unmarshaledValue interface{}
 				err := json.Unmarshal(fieldValue.Interface().([]byte), &unmarshaledValue)
 				if err != nil {
 					utils.DebugLog("-- processXtreamStruct: JSON unmarshal error: %v", err)
-					return fieldValue.Interface()
+					return item
 				}
 				return unmarshaledValue
 			}
