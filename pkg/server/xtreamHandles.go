@@ -145,6 +145,9 @@ func (c *Config) xtreamGetAuto(ctx *gin.Context) {
 }
 
 func (c *Config) xtreamGet(ctx *gin.Context) {
+	// Always use Xtream credentials from config for backend requests
+	utils.DebugLog("Xtream backend request using Xtream credentials: user=%s, password=%s, baseURL=%s", 
+		c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL)
 	rawURL := fmt.Sprintf("%s/get.php?username=%s&password=%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword)
 
 	q := ctx.Request.URL.Query()
@@ -257,6 +260,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 	}
 
 	client, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, ctx.Request.UserAgent())
+	
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
 		return
@@ -384,6 +388,7 @@ func (c *Config) xtreamXMLTV(ctx *gin.Context) {
 
 func (c *Config) xtreamStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
+	// Always use Xtream credentials for upstream requests
 	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
@@ -395,6 +400,7 @@ func (c *Config) xtreamStreamHandler(ctx *gin.Context) {
 
 func (c *Config) xtreamStreamLive(ctx *gin.Context) {
 	id := ctx.Param("id")
+	// Always use Xtream credentials for upstream requests
 	rpURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
@@ -420,6 +426,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	duration := ctx.Param("duration")
 	start := ctx.Param("start")
 	id := ctx.Param("id")
+	// Always use Xtream credentials for upstream requests
 	rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
@@ -431,7 +438,21 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
 	id := ctx.Param("id")
+	// Always use Xtream credentials for upstream requests
 	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+
+	utils.DebugLog("Movie streaming request - using Xtream credentials for upstream: %s", rpURL.String())
+	c.xtreamStream(ctx, rpURL)
+}
+
+func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
+	id := ctx.Param("id")
+	// Always use Xtream credentials for upstream requests
+	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
 		return
@@ -440,14 +461,69 @@ func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
 	c.xtreamStream(ctx, rpURL)
 }
 
-func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
+// Added to handle direct streaming URLs with proxy credentials instead of Xtream credentials
+func (c *Config) xtreamProxyCredentialsStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
+	utils.DebugLog("Direct stream request with proxy credentials: username=%s, password=%s, id=%s", 
+		ctx.Param("username"), ctx.Param("password"), id)
+	
+	// Always use Xtream credentials for upstream requests
+	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+
+	utils.DebugLog("Redirecting to upstream URL with Xtream credentials: %s", rpURL.String())
+	c.xtreamStream(ctx, rpURL)
+}
+
+// Similar handlers for other stream types using proxy credentials
+func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
+	id := ctx.Param("id")
+	utils.DebugLog("Direct live stream request with proxy credentials: username=%s, password=%s, id=%s", 
+		ctx.Param("username"), ctx.Param("password"), id)
+	
+	// Always use Xtream credentials for upstream requests
+	rpURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+
+	utils.DebugLog("Redirecting to upstream URL with Xtream credentials: %s", rpURL.String())
+	c.xtreamStream(ctx, rpURL)
+}
+
+func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {
+	id := ctx.Param("id")
+	utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, password=%s, id=%s", 
+		ctx.Param("username"), ctx.Param("password"), id)
+	
+	// Always use Xtream credentials for upstream requests
+	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+
+	utils.DebugLog("Redirecting to upstream URL with Xtream credentials: %s", rpURL.String())
+	c.xtreamStream(ctx, rpURL)
+}
+
+func (c *Config) xtreamProxyCredentialsSeriesStreamHandler(ctx *gin.Context) {
+	id := ctx.Param("id")
+	utils.DebugLog("Direct series stream request with proxy credentials: username=%s, password=%s, id=%s", 
+		ctx.Param("username"), ctx.Param("password"), id)
+	
+	// Always use Xtream credentials for upstream requests
 	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
 		return
 	}
 
+	utils.DebugLog("Redirecting to upstream URL with Xtream credentials: %s", rpURL.String())
 	c.xtreamStream(ctx, rpURL)
 }
 
@@ -502,8 +578,8 @@ func (c *Config) xtreamHlsrStream(ctx *gin.Context) {
 			url.Scheme,
 			url.Host,
 			ctx.Param("token"),
-			c.XtreamUser,
-			c.XtreamPassword,
+			c.XtreamUser,     // Always use Xtream credentials
+			c.XtreamPassword, // Always use Xtream credentials
 			ctx.Param("channel"),
 			ctx.Param("hash"),
 			ctx.Param("chunk"),
@@ -531,6 +607,7 @@ func getHlsRedirectURL(channel string) (*url.URL, error) {
 }
 
 func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
+	utils.DebugLog("HLS stream request with URL: %s", oriURL.String())
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -585,8 +662,12 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 				return
 			}
 			body := string(b)
+			
+			// Replace upstream Xtream credentials with proxy user credentials in response
+			// This doesn't affect the upstream requests, only what the client sees
 			body = strings.ReplaceAll(body, "/"+c.XtreamUser.String()+"/"+c.XtreamPassword.String()+"/", "/"+c.User.String()+"/"+c.Password.String()+"/")
 
+			utils.DebugLog("HLS stream response modified to use proxy credentials for client URLs")
 			mergeHttpHeader(ctx.Writer.Header(), hlsResp.Header)
 
 			ctx.Data(http.StatusOK, hlsResp.Header.Get("Content-Type"), []byte(body))

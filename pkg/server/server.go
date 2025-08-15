@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -31,6 +32,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/jamesnetherton/m3u"
 	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
+	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
 	uuid "github.com/satori/go.uuid"
 
 	"github.com/gin-gonic/gin"
@@ -68,6 +70,9 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		endpointAntiColision = trimmedCustomId
 	}
 
+	// Initialize debug logging from environment variable
+	utils.Config.DebugLoggingEnabled = os.Getenv("DEBUG_LOGGING") == "true"
+
 	return &Config{
 		config,
 		&p,
@@ -87,11 +92,84 @@ func (c *Config) Serve() error {
 	router.Use(cors.Default())
 	group := router.Group("/")
 	c.routes(group)
+	
+	// Add direct streaming routes with proxy credentials
+	c.addProxyCredentialRoutes(router)
 
 	// Add a message to indicate the server is ready
 	log.Printf("[iptv-proxy] Server is ready and listening on :%d", c.HostConfig.Port)
 
 	return router.Run(fmt.Sprintf(":%d", c.HostConfig.Port))
+}
+
+// Add direct streaming routes with proxy credentials
+func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
+	log.Printf("[iptv-proxy] Setting up direct stream routes with proxy credentials")
+	
+	// Handle root level streaming endpoints with proxy credentials
+	router.GET("/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsStreamHandler)
+	
+	// Handle live, movie, series endpoints with proxy credentials
+	router.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsLiveStreamHandler)
+	router.GET("/movie/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsMovieStreamHandler)
+	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsSeriesStreamHandler)
+	
+	// Handle timeshift with proxy credentials
+	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
+		duration := ctx.Param("duration")
+		start := ctx.Param("start")
+		id := ctx.Param("id")
+		log.Printf("[DEBUG] Timeshift request with proxy credentials: %s/%s/%s", duration, start, id)
+		
+		// Use Xtream credentials for upstream request
+		rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s", 
+			c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
+		if err != nil {
+			ctx.AbortWithError(http.StatusInternalServerError, err)
+			return
+		}
+		
+		c.stream(ctx, rpURL)
+	})
+
+	log.Printf("[iptv-proxy] Routes initialized with direct stream URL support")
+}
+
+// Authentication middleware that checks credentials from URL path parameters
+func (c *Config) authWithPathCredentials() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		username := ctx.Param("username")
+		password := ctx.Param("password")
+		
+		log.Printf("[DEBUG] Path credentials auth check: username=%s", username)
+		
+		// If LDAP is enabled, authenticate against LDAP
+		if c.ProxyConfig.LDAPEnabled {
+			ok := ldapAuthenticate(
+				c.ProxyConfig.LDAPServer,
+				c.ProxyConfig.LDAPBaseDN,
+				c.ProxyConfig.LDAPBindDN,
+				c.ProxyConfig.LDAPBindPassword,
+				c.ProxyConfig.LDAPUserAttribute,
+				c.ProxyConfig.LDAPGroupAttribute,
+				c.ProxyConfig.LDAPRequiredGroup,
+				username,
+				password,
+			)
+			if !ok {
+				log.Printf("[DEBUG] LDAP authentication failed for user in path: %s", username)
+				ctx.AbortWithStatus(http.StatusUnauthorized)
+				return
+			}
+			log.Printf("[DEBUG] LDAP authentication succeeded for user in path: %s", username)
+		} else if c.ProxyConfig.User.String() != username || c.ProxyConfig.Password.String() != password {
+			log.Printf("[DEBUG] Local authentication failed for user in path: %s", username)
+			ctx.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		
+		ctx.Next()
+	}
 }
 
 func (c *Config) playlistInitialization() error {

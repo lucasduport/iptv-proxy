@@ -60,6 +60,8 @@ var rootCmd = &cobra.Command{
 			password = remoteHostURL.Query().Get("password")
 		}
 
+		// Always use Xtream credentials from env/config for backend queries.
+		// Proxy authentication (LDAP/local) is only for access control to the proxy itself.
 		if xtreamBaseURL == "" && xtreamPassword == "" && xtreamUser == "" {
 			if username != "" && password != "" {
 				log.Printf("[iptv-proxy] INFO: It's seams you are using an Xtream provider!")
@@ -104,6 +106,8 @@ var rootCmd = &cobra.Command{
 			LDAPBindDN:           viper.GetString("ldap-bind-dn"),
 			LDAPBindPassword:     viper.GetString("ldap-bind-password"),
 			LDAPUserAttribute:    viper.GetString("ldap-user-attribute"),
+			LDAPGroupAttribute:   viper.GetString("ldap-group-attribute"),
+			LDAPRequiredGroup:    viper.GetString("ldap-required-group"),
 		}
 
 		if conf.AdvertisedPort == 0 {
@@ -158,6 +162,8 @@ func init() {
 	rootCmd.Flags().String("ldap-bind-dn", "", "LDAP bind DN")
 	rootCmd.Flags().String("ldap-bind-password", "", "LDAP bind password")
 	rootCmd.Flags().String("ldap-user-attribute", "uid", "LDAP user attribute (e.g., uid, sAMAccountName)")
+	rootCmd.Flags().String("ldap-group-attribute", "memberOf", "LDAP group attribute for checking group membership")
+	rootCmd.Flags().String("ldap-required-group", "iptv", "Required LDAP group for authentication")
 
 	if e := viper.BindPFlags(rootCmd.Flags()); e != nil {
 		log.Fatal("error binding PFlags to viper")

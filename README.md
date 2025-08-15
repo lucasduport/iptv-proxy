@@ -29,6 +29,10 @@ proxy on Xtream code (client API)
 
 support live, vod, series and full epg :rocket:
 
+> **Important:**  
+> All backend queries to the Xtream API (live, vod, series, etc.) always use the Xtream credentials (`xtream-user`, `xtream-password`, `xtream-base-url`) from environment variables or config file.  
+> The proxy/LDAP user credentials are only used for authenticating access to the proxy, **never for backend Xtream API requests**.
+
 ### M3u Example
 
 Original iptv m3u file
@@ -184,7 +188,9 @@ Or
 
 LDAP authentication can be enabled to authenticate users against an LDAP directory. If enabled, local credentials are ignored and only LDAP authentication is used.
 
-**Note:** LDAP support was added by myself in this fork.
+> **Important:**  
+> All backend queries to the Xtream API (live, vod, series, etc.) always use the Xtream credentials (`xtream-user`, `xtream-password`, `xtream-base-url`) from environment variables or config file.  
+> The proxy/LDAP user credentials are only used for authenticating access to the proxy, **never for backend Xtream API requests**.
 
 ### Configuration
 
@@ -196,6 +202,8 @@ Set the following environment variables or configuration options:
 - `LDAP_BIND_DN`: Bind DN for service account (optional, for searching users).
 - `LDAP_BIND_PASSWORD`: Password for service account (optional).
 - `LDAP_USER_ATTRIBUTE`: LDAP attribute for username (e.g., `uid`).
+- `LDAP_GROUP_ATTRIBUTE`: LDAP attribute for group membership (e.g., `memberOf`).
+- `LDAP_REQUIRED_GROUP`: Required group for authentication (default: `iptv`).
 
 Example configuration in environment variables:
 
@@ -206,9 +214,14 @@ LDAP_BASE_DN=ou=users,dc=example,dc=com
 LDAP_BIND_DN=cn=admin,dc=example,dc=com
 LDAP_BIND_PASSWORD=adminpassword
 LDAP_USER_ATTRIBUTE=uid
+LDAP_GROUP_ATTRIBUTE=memberOf
+LDAP_REQUIRED_GROUP=iptv
 ```
 
-If LDAP is enabled, users must authenticate with their LDAP username and password.
+If LDAP is enabled:
+1. Users must authenticate with their LDAP username and password
+2. Users must be members of the specified group (default: "iptv")
+3. All upstream requests will **always** use the Xtream credentials configured in the environment variables
 
 ## TLS - https with traefik
 

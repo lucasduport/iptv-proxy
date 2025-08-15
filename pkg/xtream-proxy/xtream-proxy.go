@@ -104,6 +104,9 @@ func (c *Client) Action(config *config.ProxyConfig, action string, q url.Values)
 	// Default content type for most responses
 	contentType = "application/json"
 
+	// Debug log: always use Xtream credentials from config
+	utils.DebugLog("Xtream API backend call: user=%s, password=%s, baseURL=%s", config.XtreamUser.String(), config.XtreamPassword.String(), config.XtreamBaseURL)
+
 	switch action {
 	case getLiveCategories:
 		respBody, err = c.GetLiveCategories()
@@ -198,7 +201,15 @@ func (c *Client) Action(config *config.ProxyConfig, action string, q url.Values)
 			err = utils.PrintErrorAndReturn(err)
 		}
 	default:
-		respBody, err = c.login(config.User.String(), config.Password.String(), protocol+"://"+config.HostConfig.Hostname, config.AdvertisedPort, protocol)
+		// Always use Xtream credentials from config for login response
+		// but return the proxy credentials to the client
+		respBody, err = c.login(
+			config.User.String(),
+			config.Password.String(),
+			protocol+"://"+config.HostConfig.Hostname,
+			config.AdvertisedPort,
+			protocol,
+		)
 		if err != nil {
 			err = utils.PrintErrorAndReturn(err)
 		}

@@ -69,4 +69,6 @@ type ProxyConfig struct {
 	LDAPBindDN           string
 	LDAPBindPassword     string
 	LDAPUserAttribute    string
+	LDAPGroupAttribute   string
+	LDAPRequiredGroup    string
 }
