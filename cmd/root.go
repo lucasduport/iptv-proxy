@@ -26,8 +26,8 @@ import (
 	"strings"
 
 	homedir "github.com/mitchellh/go-homedir"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/server"
+	"github.com/lucasduport/iptv-proxy/pkg/config"
+	"github.com/lucasduport/iptv-proxy/pkg/server"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -160,22 +160,22 @@ func init() {
 	rootCmd.Flags().BoolP("https", "", false, "Use HTTPS for generated URLs")
 	rootCmd.Flags().Int("m3u-cache-expiration", 1, "M3U cache expiration in hours")
 
-	// Authentication flags
-	rootCmd.Flags().String("user", "usertest", "Basic auth username")
-	rootCmd.Flags().String("password", "passwordtest", "Basic auth password")
+	// Authentication configuration 
+	rootCmd.Flags().String("user", "usertest", "Username for basic authentication when LDAP is not enabled")
+	rootCmd.Flags().String("password", "passwordtest", "Password for basic authentication when LDAP is not enabled")
 
-	// Xtream-specific flags
-	rootCmd.Flags().String("xtream-user", "", "Xtream API username")
-	rootCmd.Flags().String("xtream-password", "", "Xtream API password")
-	rootCmd.Flags().String("xtream-base-url", "", "Xtream API base URL")
-	rootCmd.Flags().BoolP("xtream-api-get", "", false, "Generate get.php from API")
+	// Xtream API configuration
+	rootCmd.Flags().String("xtream-user", "", "Username for accessing the upstream Xtream API")
+	rootCmd.Flags().String("xtream-password", "", "Password for accessing the upstream Xtream API")
+	rootCmd.Flags().String("xtream-base-url", "", "Base URL of the upstream Xtream API service")
+	rootCmd.Flags().BoolP("xtream-api-get", "", false, "Generate get.php endpoint from API data")
 
-	// LDAP authentication flags
-	rootCmd.Flags().Bool("ldap-enabled", false, "Enable LDAP authentication")
-	rootCmd.Flags().String("ldap-server", "", "LDAP server URL")
-	rootCmd.Flags().String("ldap-base-dn", "", "LDAP base DN")
-	rootCmd.Flags().String("ldap-bind-dn", "", "LDAP bind DN")
-	rootCmd.Flags().String("ldap-bind-password", "", "LDAP bind password")
+	// LDAP authentication configuration
+	rootCmd.Flags().Bool("ldap-enabled", false, "Enable LDAP authentication instead of basic auth")
+	rootCmd.Flags().String("ldap-server", "", "LDAP server URL (e.g., ldap://ldap.example.com:389)")
+	rootCmd.Flags().String("ldap-base-dn", "", "Base DN for LDAP user search")
+	rootCmd.Flags().String("ldap-bind-dn", "", "DN for binding to LDAP server (service account)")
+	rootCmd.Flags().String("ldap-bind-password", "", "Password for LDAP bind DN")
 	rootCmd.Flags().String("ldap-user-attribute", "uid", "LDAP username attribute")
 	rootCmd.Flags().String("ldap-group-attribute", "memberOf", "LDAP group attribute")
 	rootCmd.Flags().String("ldap-required-group", "iptv", "Required LDAP group")

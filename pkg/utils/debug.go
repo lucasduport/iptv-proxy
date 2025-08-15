@@ -101,27 +101,28 @@ func WriteResponseToFile(filename string, data []byte, contentType string) {
 	}
 }
 
-// SaveRawResponse saves a raw API response to a file for debugging
+// SaveRawResponse saves a raw API response to a file for debugging purposes
+// Returns the path to the saved file or empty string if the operation failed
 func SaveRawResponse(action string, data []byte) string {
-	// Only proceed if debug logging is enabled
+	// Skip if debug logging is disabled
 	if !DebugLoggingEnabled {
 		return ""
 	}
 
-	// Create base debug directory
+	// Create debug directory under system temp
 	debugDir := filepath.Join(os.TempDir(), "iptv-proxy-debug")
 	if err := os.MkdirAll(debugDir, 0755); err != nil {
 		ErrorLog("Failed to create debug directory: %v", err)
 		return ""
 	}
 
-	// Format filename with timestamp
+	// Format filename with action and timestamp
 	timestamp := time.Now().Format("20060102_150405")
-	cleanAction := action
-	if cleanAction == "" {
-		cleanAction = "login"
+	actionName := action
+	if actionName == "" {
+		actionName = "login"
 	}
-	filename := filepath.Join(debugDir, fmt.Sprintf("%s_%s.json", cleanAction, timestamp))
+	filename := filepath.Join(debugDir, fmt.Sprintf("%s_%s.json", actionName, timestamp))
 
 	// Write data to file
 	if err := os.WriteFile(filename, data, 0644); err != nil {
@@ -129,7 +130,7 @@ func SaveRawResponse(action string, data []byte) string {
 		return ""
 	}
 
-	// If it's JSON, also write a pretty-printed version
+	// For JSON data, save a prettified version for easier inspection
 	var prettyData interface{}
 	if json.Unmarshal(data, &prettyData) == nil {
 		prettyBytes, err := json.MarshalIndent(prettyData, "", "  ")

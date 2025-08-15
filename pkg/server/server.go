@@ -31,8 +31,8 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/jamesnetherton/m3u"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
+	"github.com/lucasduport/iptv-proxy/pkg/config"
+	"github.com/lucasduport/iptv-proxy/pkg/utils"
 	uuid "github.com/satori/go.uuid"
 
 	"github.com/gin-gonic/gin"

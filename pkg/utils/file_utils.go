@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/gin-gonic/gin"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
+	"github.com/lucasduport/iptv-proxy/pkg/config"
 )
 
 func WriteResponseToFileWithOverwrite(ctx *gin.Context, resp interface{}, overwrite bool, contentType string, optionalURL ...string) {

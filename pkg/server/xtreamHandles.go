@@ -37,9 +37,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jamesnetherton/m3u"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
-	xtreamapi "github.com/pierre-emmanuelJ/iptv-proxy/pkg/xtream-proxy"
+	"github.com/lucasduport/iptv-proxy/pkg/config"
+	"github.com/lucasduport/iptv-proxy/pkg/utils"
+	xtreamapi "github.com/lucasduport/iptv-proxy/pkg/xtream-proxy"
 	uuid "github.com/satori/go.uuid"
 )
 

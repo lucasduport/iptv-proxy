@@ -1,4 +1,4 @@
-module github.com/pierre-emmanuelJ/iptv-proxy
+module github.com/lucasduport/iptv-proxy
 
 require (
 	github.com/buger/jsonparser v1.1.1

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
+	"github.com/lucasduport/iptv-proxy/pkg/utils"
 )
 
 // CustomFlexInt is a flexible integer type that can unmarshal from

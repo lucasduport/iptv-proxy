@@ -31,8 +31,8 @@ import (
     "time"
     "unicode/utf8"
 
-    "github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
-    "github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
+    "github.com/lucasduport/iptv-proxy/pkg/config"
+    "github.com/lucasduport/iptv-proxy/pkg/utils"
 )
 
 // API endpoint constants
@@ -380,62 +380,112 @@ func sanitizeJSON(input string) string {
 }
 
 // sanitizeUnicodeJSON sanitizes JSON containing problematic Unicode characters
-// that often cause parsing issues with Xtream providers
+// that often cause parsing issues with Xtream providers.
+// Returns a cleaned version of the JSON byte array.
 func sanitizeUnicodeJSON(input []byte) []byte {
-    result := string(input)
-    
-    utils.DebugLog("sanitizeUnicodeJSON: Original length %d bytes", len(result))
-    
-    // Remove BOM if present (common issue with some providers)
-    if strings.HasPrefix(result, "\uFEFF") {
-        result = strings.TrimPrefix(result, "\uFEFF")
-        utils.DebugLog("Removed UTF-8 BOM marker")
+    // Early return for empty input
+    if len(input) == 0 {
+        return input
     }
     
-    // Replace common problematic characters
-    result = strings.ReplaceAll(result, "\u0000", "")
-    result = strings.ReplaceAll(result, "\\/", "/")
+    result := string(input)
+    originalLen := len(result)
+    utils.DebugLog("Sanitizing JSON: original length %d bytes", originalLen)
     
-    // Fix common JSON syntax errors
-    result = strings.ReplaceAll(result, ",]", "]")
-    result = strings.ReplaceAll(result, ",}", "}")
-    result = strings.ReplaceAll(result, ",,", ",")
+    // Step 1: Remove BOM and null bytes
+    result = removeProblematicCharacters(result)
     
-    // Replace any control characters
+    // Step 2: Fix common JSON syntax errors
+    result = fixJsonSyntaxErrors(result)
+    
+    // Step 3: Fix Unicode quote issues
+    result = normalizeQuotes(result)
+    
+    // Step 4: Ensure UTF-8 validity
+    result = fixBrokenUTF8(result)
+    
+    // Step 5: Balance brackets and braces
+    result = balanceBracketsAndBraces(result)
+    
+    utils.DebugLog("Sanitizing complete: new length %d bytes (%d%% of original)",
+        len(result), (len(result) * 100 / max(1, originalLen)))
+    
+    return []byte(result)
+}
+
+// removeProblematicCharacters removes common problematic characters from JSON
+func removeProblematicCharacters(s string) string {
+    // Remove BOM if present
+    s = strings.TrimPrefix(s, "\uFEFF")
+    
+    // Remove null bytes and normalize slashes
+    s = strings.ReplaceAll(s, "\u0000", "")
+    s = strings.ReplaceAll(s, "\\/", "/")
+    
+    // Remove control characters except whitespace
     for i := 0; i < 32; i++ {
         if i != 9 && i != 10 && i != 13 { // Keep tabs, newlines, and carriage returns
-            result = strings.ReplaceAll(result, string(rune(i)), "")
+            s = strings.ReplaceAll(s, string(rune(i)), "")
         }
     }
     
-    // Fix Unicode quotes that might be used inconsistently
-    result = strings.ReplaceAll(result, "“", "\"")
-    result = strings.ReplaceAll(result, "”", "\"")
-    result = strings.ReplaceAll(result, "‘", "'")
-    result = strings.ReplaceAll(result, "’", "'")
-    result = strings.ReplaceAll(result, "«", "\"")
-    result = strings.ReplaceAll(result, "»", "\"")
+    return s
+}
+
+// fixJsonSyntaxErrors fixes common JSON syntax errors
+func fixJsonSyntaxErrors(s string) string {
+    // Fix trailing commas
+    s = strings.ReplaceAll(s, ",]", "]")
+    s = strings.ReplaceAll(s, ",}", "}")
     
-    // Fix UTF-8 encoding issues
-    result = fixBrokenUTF8(result)
+    // Fix double commas and colons
+    s = strings.ReplaceAll(s, ",,", ",")
+    s = strings.ReplaceAll(s, "::", ":")
     
-    // Ensure proper nesting - add missing close brackets/braces if needed
-    openBrackets := strings.Count(result, "[")
-    closeBrackets := strings.Count(result, "]")
+    return s
+}
+
+// normalizeQuotes replaces various Unicode quote types with standard JSON double quotes
+func normalizeQuotes(s string) string {
+    replacements := map[string]string{
+        "“": "\"",
+        "”": "\"",
+        "‘": "'",
+        "’": "'",
+        "«": "\"",
+        "»": "\"",
+    }
+
+    for from, to := range replacements {
+        s = strings.ReplaceAll(s, from, to)
+    }
+
+    return s
+}
+
+// balanceBracketsAndBraces ensures JSON has balanced brackets and braces
+func balanceBracketsAndBraces(s string) string {
+    // Count opening and closing brackets
+    openBrackets := strings.Count(s, "[")
+    closeBrackets := strings.Count(s, "]")
+    
+    // Add missing closing brackets if needed
     for i := 0; i < openBrackets-closeBrackets; i++ {
-        result += "]"
+        s += "]"
         utils.DebugLog("Added missing closing bracket ]")
     }
     
-    openBraces := strings.Count(result, "{")
-    closeBraces := strings.Count(result, "}")
+    // Count opening and closing braces
+    openBraces := strings.Count(s, "{")
+    closeBraces := strings.Count(s, "}")
+    
+    // Add missing closing braces if needed
     for i := 0; i < openBraces-closeBraces; i++ {
-        result += "}"
+        s += "}"
         utils.DebugLog("Added missing closing brace }")
     }
     
-    utils.DebugLog("sanitizeUnicodeJSON: New length %d bytes", len(result))
-    return []byte(result)
+    return s
 }
 
 // fixBrokenUTF8 attempts to fix broken UTF-8 sequences

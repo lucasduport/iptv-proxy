@@ -160,7 +160,7 @@ Set `DEBUG_LOGGING` to `"false"` for production deployments.
 
 ## Support
 
-If you find this project useful, consider buying me a beer 🍻
+If you find this project useful, consider supporting its development:
 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.me/lucasdup135)
 

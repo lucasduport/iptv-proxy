@@ -27,7 +27,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
+	"github.com/lucasduport/iptv-proxy/pkg/utils"
 )
 
 func (c *Config) routes(r *gin.RouterGroup) {
