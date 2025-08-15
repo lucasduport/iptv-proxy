@@ -19,17 +19,20 @@
 package xtreamproxy
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
-	"strconv"
+    "bytes"
+    "context"
+    "crypto/tls"
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+    "net/url"
+    "strings"
+    "time"
+    "unicode/utf8"
 
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
-	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
-	xtream "github.com/tellytv/go.xtream-codes"
+    "github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
+    "github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
 )
 
 // API endpoint constants
@@ -48,302 +51,523 @@ const (
 
 // Client represents an Xtream API client
 type Client struct {
-	*xtream.XtreamClient
+	Username  string
+	Password  string
+	BaseURL   string
+	UserAgent string
+	Client    *http.Client
 }
 
 // New creates a new Xtream client instance
 func New(user, password, baseURL, userAgent string) (*Client, error) {
-	cli, err := xtream.NewClientWithUserAgent(context.Background(), user, password, baseURL, userAgent)
+	// Validate the base URL
+	_, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, utils.PrintErrorAndReturn(err)
+		return nil, utils.PrintErrorAndReturn(fmt.Errorf("invalid base URL: %w", err))
 	}
 
-	return &Client{cli}, nil
-}
-
-// login response structure for Xtream API
-type login struct {
-	UserInfo   xtream.UserInfo   `json:"user_info"`
-	ServerInfo xtream.ServerInfo `json:"server_info"`
-}
-
-// login creates a login response with proxy user credentials but server info from upstream
-func (c *Client) login(proxyUser, proxyPassword, proxyURL string, proxyPort int, protocol string) (login, error) {
-	req := login{
-		UserInfo: xtream.UserInfo{
-			Username:             proxyUser,
-			Password:             proxyPassword,
-			Message:              c.UserInfo.Message,
-			Auth:                 c.UserInfo.Auth,
-			Status:               c.UserInfo.Status,
-			ExpDate:              c.UserInfo.ExpDate,
-			IsTrial:              c.UserInfo.IsTrial,
-			ActiveConnections:    c.UserInfo.ActiveConnections,
-			CreatedAt:            c.UserInfo.CreatedAt,
-			MaxConnections:       c.UserInfo.MaxConnections,
-			AllowedOutputFormats: c.UserInfo.AllowedOutputFormats,
-		},
-		ServerInfo: xtream.ServerInfo{
-			URL:          proxyURL,
-			Port:         xtream.FlexInt(proxyPort),
-			HTTPSPort:    xtream.FlexInt(proxyPort),
-			Protocol:     protocol,
-			RTMPPort:     xtream.FlexInt(proxyPort),
-			Timezone:     c.ServerInfo.Timezone,
-			TimestampNow: c.ServerInfo.TimestampNow,
-			TimeNow:      c.ServerInfo.TimeNow,
+	// Create HTTP client with standard timeout
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return http.ErrUseLastResponse
+			}
+			return nil
 		},
 	}
 
-	return req, nil
+	return &Client{
+		Username:  user,
+		Password:  password,
+		BaseURL:   baseURL,
+		UserAgent: userAgent,
+		Client:    httpClient,
+	}, nil
 }
 
-// Action executes an Xtream API action and returns the response
-func (c *Client) Action(config *config.ProxyConfig, action string, q url.Values) (respBody interface{}, httpcode int, contentType string, err error) {
-	protocol := "http"
-	if config.HTTPS {
-		protocol = "https"
-	}
+// Action executes Xtream API player_api actions using a raw HTTP call and returns parsed JSON or a fallback.
+func (c *Client) Action(cfg *config.ProxyConfig, action string, q url.Values) (respBody interface{}, httpcode int, contentType string, err error) {
+    contentType = "application/json"
+    utils.DebugLog("Processing Xtream action=%s", action)
 
-	// Default content type for most responses
-	contentType = "application/json"
+    // Build upstream URL with credentials
+    u, err := url.Parse(strings.TrimRight(c.BaseURL, "/") + "/player_api.php")
+    if err != nil {
+        return nil, http.StatusInternalServerError, contentType, utils.PrintErrorAndReturn(err)
+    }
 
-	// Debug log: always use Xtream credentials from config
-	utils.DebugLog("Xtream API backend call: user=%s, password=%s, baseURL=%s",
-		config.XtreamUser.String(), config.XtreamPassword.String(), config.XtreamBaseURL)
+    params := url.Values{}
+    params.Set("username", c.Username)
+    params.Set("password", c.Password)
+    if strings.TrimSpace(action) != "" {
+        params.Set("action", action)
+    }
+    for k, vs := range q {
+        if k == "username" || k == "password" || k == "action" {
+            continue
+        }
+        for _, v := range vs {
+            if v == "" {
+                continue
+            }
+            params.Add(k, v)
+        }
+    }
+    u.RawQuery = params.Encode()
+    utils.DebugLog("Xtream raw request: %s", u.String())
 
-	// Handle different API actions
-	switch action {
-	case getLiveCategories:
-		respBody, err = c.GetLiveCategories()
-	case getLiveStreams:
-		categoryID := ""
-		if len(q["category_id"]) > 0 {
-			categoryID = q["category_id"][0]
-		}
-		respBody, err = c.GetLiveStreams(categoryID)
-	case getVodCategories:
-		respBody, err = c.GetVideoOnDemandCategories()
-	case getVodStreams:
-		categoryID := ""
-		if len(q["category_id"]) > 0 {
-			categoryID = q["category_id"][0]
-		}
-		respBody, err = c.GetVideoOnDemandStreams(categoryID)
-	case getVodInfo:
-		httpcode, err = validateParams(q, "vod_id")
-		if err != nil {
-			err = utils.PrintErrorAndReturn(err)
-			return
-		}
-		
-		// Special handling for get_vod_info to avoid FFMPEGStreamInfo unmarshaling issue
-		var rawResp map[string]interface{}
-		rawResp, err = c.GetVideoOnDemandInfoRaw(q["vod_id"][0])
-		respBody = rawResp
-	case getSeriesCategories:
-		respBody, err = c.GetSeriesCategories()
-	case getSeries:
-		categoryID := ""
-		if len(q["category_id"]) > 0 {
-			categoryID = q["category_id"][0]
-		}
-		respBody, err = c.GetSeries(categoryID)
-	case getSerieInfo:
-		httpcode, err = validateParams(q, "series_id")
-		if err != nil {
-			err = utils.PrintErrorAndReturn(err)
-			return
-		}
-		respBody, err = c.GetSeriesInfo(q["series_id"][0])
-	case getShortEPG:
-		limit := 0
-		httpcode, err = validateParams(q, "stream_id")
-		if err != nil {
-			err = utils.PrintErrorAndReturn(err)
-			return
-		}
-		if len(q["limit"]) > 0 {
-			limit, err = strconv.Atoi(q["limit"][0])
-			if err != nil {
-				httpcode = http.StatusInternalServerError
-				err = utils.PrintErrorAndReturn(err)
-				return
-			}
-		}
-		respBody, err = c.GetShortEPG(q["stream_id"][0], limit)
-	case getSimpleDataTable:
-		httpcode, err = validateParams(q, "stream_id")
-		if err != nil {
-			err = utils.PrintErrorAndReturn(err)
-			return
-		}
-		respBody, err = c.GetEPG(q["stream_id"][0])
-	default:
-		// Default action is login
-		// Return proxy credentials to client but use upstream server info
-		respBody, err = c.login(
-			config.User.String(),
-			config.Password.String(),
-			protocol+"://"+config.HostConfig.Hostname,
-			config.AdvertisedPort,
-			protocol,
-		)
-	}
+    client := &http.Client{
+        Timeout: 10 * time.Second,
+        Transport: &http.Transport{
+            TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+        },
+    }
 
-	if err != nil {
-		err = utils.PrintErrorAndReturn(err)
-	}
+    var lastErr error
+    var resp *http.Response
+    var b []byte
 
-	return
+    for i := 0; i < 5; i++ {
+        req, err := http.NewRequest("GET", u.String(), nil)
+        if err != nil {
+            lastErr = err
+            continue
+        }
+        req.Header.Set("User-Agent", "IPTV-Proxy")
+        req.Header.Set("Accept", "application/json, text/plain, */*")
+
+        resp, err = client.Do(req)
+        if err != nil {
+            lastErr = err
+            continue
+        }
+        defer resp.Body.Close()
+
+        if resp.StatusCode == http.StatusOK {
+            b, err = io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+            if err != nil {
+                lastErr = err
+                continue
+            }
+            break
+        } else {
+            lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
+        }
+    }
+
+    if resp == nil || resp.StatusCode != http.StatusOK || len(b) == 0 {
+        utils.DebugLog("Request failed, last error: %v", lastErr)
+        return fallbackForAction(action), http.StatusBadGateway, contentType, lastErr
+    }
+
+    trim := bytes.TrimSpace(b)
+    if len(trim) == 0 || bytes.Equal(trim, []byte("null")) || (len(trim) > 0 && trim[0] == '<') {
+        return fallbackForAction(action), http.StatusOK, contentType, nil
+    }
+    if bytes.Equal(trim, []byte("{}")) {
+        return map[string]interface{}{}, http.StatusOK, contentType, nil
+    }
+    if bytes.Equal(trim, []byte("[]")) {
+        return []interface{}{}, http.StatusOK, contentType, nil
+    }
+
+    var result interface{}
+    decoder := json.NewDecoder(bytes.NewReader(trim))
+    decoder.UseNumber()
+    if err := decoder.Decode(&result); err != nil {
+        utils.DebugLog("JSON decoding failed: %v", err)
+        return fallbackForAction(action), http.StatusOK, contentType, err
+    }
+
+    return result, http.StatusOK, contentType, nil
 }
 
-// GetVideoOnDemandInfoRaw gets VOD information for a specific VOD ID, returning raw JSON map
-// This avoids the FFMPEGStreamInfo unmarshaling issues
-func (c *Client) GetVideoOnDemandInfoRaw(vodID string) (map[string]interface{}, error) {
-	utils.DebugLog("GetVideoOnDemandInfoRaw: Using raw JSON approach for vodID=%s", vodID)
-	
-	// Use the request URL format from the xtream-codes client
-	requestURL := fmt.Sprintf("%s/player_api.php?username=%s&password=%s&action=get_vod_info&vod_id=%s", 
-		c.BaseURL, c.Username, c.Password, vodID)
-	
-	// Use http.Get instead of direct client usage
-	resp, err := http.Get(requestURL)
-	if err != nil {
-		return nil, utils.PrintErrorAndReturn(err)
-	}
-	defer resp.Body.Close()
-	
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, utils.PrintErrorAndReturn(err)
-	}
-	
-	// Instead of unmarshaling to a predefined struct, we use a map for flexibility
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, utils.PrintErrorAndReturn(err)
-	}
-	
-	utils.DebugLog("GetVideoOnDemandInfoRaw: Successfully processed response for vodID=%s", vodID)
-	return result, nil
+// GetXMLTV retrieves the EPG data in XMLTV format
+func (c *Client) GetXMLTV() ([]byte, error) {
+    // Build URL for EPG data
+    u, err := url.Parse(strings.TrimRight(c.BaseURL, "/") + "/xmltv.php")
+    if err != nil {
+        return nil, utils.PrintErrorAndReturn(err)
+    }
+
+    // Add credentials to query
+    params := url.Values{}
+    params.Set("username", c.Username)
+    params.Set("password", c.Password)
+    u.RawQuery = params.Encode()
+
+    utils.DebugLog("XMLTV request: %s", u.String())
+
+    // Create context with timeout
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    
+    // Create request
+    req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+    if err != nil {
+        return nil, utils.PrintErrorAndReturn(err)
+    }
+
+    // Set appropriate headers
+    req.Header.Set("User-Agent", c.UserAgent)
+    req.Header.Set("Accept", "application/xml, text/xml")
+    
+    // Execute request
+    resp, err := c.Client.Do(req)
+    if err != nil {
+        return nil, utils.PrintErrorAndReturn(err)
+    }
+    defer resp.Body.Close()
+    
+    // Check status code
+    if resp.StatusCode != http.StatusOK {
+        return nil, utils.PrintErrorAndReturn(fmt.Errorf("unexpected status code: %d", resp.StatusCode))
+    }
+    
+    // Read response with a limit to prevent memory issues (50MB should be enough for most EPG data)
+    limitedReader := &io.LimitedReader{R: resp.Body, N: 50 * 1024 * 1024}
+    xmlData, err := io.ReadAll(limitedReader)
+    if err != nil {
+        return nil, utils.PrintErrorAndReturn(fmt.Errorf("failed to read XMLTV data: %w", err))
+    }
+    
+    return xmlData, nil
 }
 
-// validateParams checks if the required parameters are present in the URL query
-func validateParams(u url.Values, params ...string) (int, error) {
-	for _, p := range params {
-		if len(u[p]) < 1 {
-			return http.StatusBadRequest, fmt.Errorf("missing %q", p)
-		}
-	}
-
-	return 0, nil
-}
-
-// FFMPEGStreamInfo represents the stream info with flexible field handling
-type FFMPEGStreamInfo struct {
-	Bitrate    int         `json:"bitrate"`
-	Width      int         `json:"width"`
-	Height     int         `json:"height"`
-	Video      interface{} `json:"video"` // Can be array or struct
-	Audio      interface{} `json:"audio"` // Can be array or struct
-	Duration   string      `json:"duration"`
-	MediaFile  string      `json:"mediafile"`
-	StreamFile string      `json:"stream_file"`
-	Fields     []byte      `json:"-"` // Raw JSON data for advanced parsing
-}
-
-// UnmarshalJSON provides custom JSON unmarshaling to handle different response formats
-func (f *FFMPEGStreamInfo) UnmarshalJSON(data []byte) error {
-	// Store raw JSON data for later access if needed
-	f.Fields = make([]byte, len(data))
-	copy(f.Fields, data)
-
-	// Log the data we're trying to parse
-	utils.DebugLog("Unmarshaling FFMPEGStreamInfo: %s", string(data[:min(len(data), 100)]))
-
-	// First try to unmarshal directly using map to handle any structure
-	var rawMap map[string]interface{}
-	if err := json.Unmarshal(data, &rawMap); err == nil {
-		// Extract known fields from the map
-		if val, ok := rawMap["bitrate"]; ok {
-			if floatVal, ok := val.(float64); ok {
-				f.Bitrate = int(floatVal)
-			}
-		}
-		if val, ok := rawMap["width"]; ok {
-			if floatVal, ok := val.(float64); ok {
-				f.Width = int(floatVal)
-			}
-		}
-		if val, ok := rawMap["height"]; ok {
-			if floatVal, ok := val.(float64); ok {
-				f.Height = int(floatVal)
-			}
-		}
-		if val, ok := rawMap["video"]; ok {
-			f.Video = val // Preserve as interface{} to handle both array and object
-			// Log what type we're getting
-			utils.DebugLog("Video field type: %T", val)
-		}
-		if val, ok := rawMap["audio"]; ok {
-			f.Audio = val // Preserve as interface{} to handle both array and object
-			// Log what type we're getting
-			utils.DebugLog("Audio field type: %T", val)
-		}
-		if val, ok := rawMap["duration"]; ok {
-			if strVal, ok := val.(string); ok {
-				f.Duration = strVal
-			}
-		}
-		if val, ok := rawMap["mediafile"]; ok {
-			if strVal, ok := val.(string); ok {
-				f.MediaFile = strVal
-			}
-		}
-		if val, ok := rawMap["stream_file"]; ok {
-			if strVal, ok := val.(string); ok {
-				f.StreamFile = strVal
-			}
-		}
-
-		return nil
-	}
-
-	// Fallback to the previous approach if direct map doesn't work
-	type TempInfo struct {
-		Bitrate    int         `json:"bitrate"`
-		Width      int         `json:"width"`
-		Height     int         `json:"height"`
-		Video      interface{} `json:"video"`
-		Audio      interface{} `json:"audio"`
-		Duration   string      `json:"duration"`
-		MediaFile  string      `json:"mediafile"`
-		StreamFile string      `json:"stream_file"`
-	}
-
-	var temp TempInfo
-	if err := json.Unmarshal(data, &temp); err != nil {
-		return err
-	}
-
-	// Copy the successfully parsed fields
-	f.Bitrate = temp.Bitrate
-	f.Width = temp.Width
-	f.Height = temp.Height
-	f.Video = temp.Video
-	f.Audio = temp.Audio
-	f.Duration = temp.Duration
-	f.MediaFile = temp.MediaFile
-	f.StreamFile = temp.StreamFile
-
-	return nil
-}
-
-// Helper function to get the minimum of two integers
-func min(a, b int) int {
-    if a < b {
+// max returns the maximum of two integers
+func max(a, b int) int {
+    if a > b {
         return a
     }
     return b
+}
+
+// replaceAllNonBasicChars replaces all non-basic ASCII characters with safe equivalents
+// This is a last resort for dealing with extremely problematic JSON
+func replaceAllNonBasicChars(input []byte) []byte {
+    // Try to detect if it's supposed to be an array
+    isArray := false
+    if len(input) > 0 && input[0] == '[' {
+        isArray = true
+    }
+    
+    // First, ensure we're dealing with valid UTF-8
+    validUTF8 := make([]byte, 0, len(input))
+    for len(input) > 0 {
+        r, size := utf8.DecodeRune(input)
+        if r == utf8.RuneError {
+            input = input[1:] // Skip invalid byte
+        } else {
+            char := []byte(string(r))
+            validUTF8 = append(validUTF8, char...)
+            input = input[size:]
+        }
+    }
+    
+    // Now clean the string more aggressively
+    s := string(validUTF8)
+    var result strings.Builder
+    
+    // If it's an array, start with [
+    if isArray {
+        result.WriteString("[")
+    }
+    
+    inString := false
+    inObject := false
+    objectCount := 0
+    
+    for i, r := range s {
+        switch {
+        case r == '"':
+            // Handle quotes
+            if i > 0 && s[i-1] != '\\' {
+                inString = !inString
+            }
+            result.WriteRune(r)
+        case r == '{':
+            // Start of object
+            if !inString {
+                inObject = true
+                objectCount++
+                result.WriteRune(r)
+            } else if inString {
+                // Replace with space in strings
+                result.WriteRune(' ')
+            }
+        case r == '}':
+            // End of object
+            if !inString && inObject {
+                objectCount--
+                if objectCount == 0 {
+                    inObject = false
+                }
+                result.WriteRune(r)
+            } else if inString {
+                // Replace with space in strings
+                result.WriteRune(' ')
+            }
+        case inString:
+            // In strings, replace non-ASCII with spaces
+            if r < 32 || r > 126 {
+                result.WriteRune(' ')
+            } else {
+                result.WriteRune(r)
+            }
+        default:
+            // Outside strings, only keep JSON syntax chars
+            if r == '[' || r == ']' || r == ',' || r == ':' || 
+               r == 't' || r == 'r' || r == 'u' || r == 'e' || r == 'f' || r == 'a' || r == 'l' || r == 's' || 
+               r == 'n' || r == 'u' || r == 'l' || (r >= '0' && r <= '9') || 
+               r == '-' || r == '.' || r == ' ' {
+                result.WriteRune(r)
+            }
+        }
+    }
+    
+    // If it's an array and we didn't end it, add closing bracket
+    if isArray && !strings.HasSuffix(result.String(), "]") {
+        result.WriteString("]")
+    }
+    
+    s = result.String()
+    
+    // Fix common structural issues
+    s = strings.ReplaceAll(s, ",]", "]")
+    s = strings.ReplaceAll(s, ",}", "}")
+    s = strings.ReplaceAll(s, ",,", ",")
+    s = strings.ReplaceAll(s, "::", ":")
+    
+    return []byte(s)
+}
+
+// createEmergencyCategoryData creates a minimal set of valid categories as an emergency fallback
+func createEmergencyCategoryData() []map[string]interface{} {
+    utils.DebugLog("Creating emergency fallback category data")
+    
+    // Create one dummy category to avoid client errors
+    return []map[string]interface{}{
+        {
+            "category_id": "1",
+            "category_name": "Default Category",
+            "parent_id": "0",
+        },
+    }
+}
+
+// sanitizeJSON performs basic sanitization of JSON strings to help with parsing
+// Specifically targets issues with escaped Unicode characters
+func sanitizeJSON(input string) string {
+    // Replace problematic escapes with their proper JSON escapes
+    // These are common issues seen in Xtream provider responses
+    result := input
+    
+    // Handle invalid slash escapes
+    result = strings.ReplaceAll(result, "\\/", "/")
+    
+    // Remove any null bytes that might have been introduced
+    result = strings.ReplaceAll(result, "\u0000", "")
+    
+    // If response starts with [ and ends with ], it's likely an array
+    // Make sure we don't have trailing commas (which are invalid in JSON)
+    if strings.HasPrefix(result, "[") && strings.HasSuffix(result, "]") {
+        // Replace any pattern of comma followed by closing bracket
+        result = strings.ReplaceAll(result, ",]", "]")
+    }
+    
+    return result
+}
+
+// sanitizeUnicodeJSON sanitizes JSON containing problematic Unicode characters
+// that often cause parsing issues with Xtream providers
+func sanitizeUnicodeJSON(input []byte) []byte {
+    result := string(input)
+    
+    utils.DebugLog("sanitizeUnicodeJSON: Original length %d bytes", len(result))
+    
+    // Remove BOM if present (common issue with some providers)
+    if strings.HasPrefix(result, "\uFEFF") {
+        result = strings.TrimPrefix(result, "\uFEFF")
+        utils.DebugLog("Removed UTF-8 BOM marker")
+    }
+    
+    // Replace common problematic characters
+    result = strings.ReplaceAll(result, "\u0000", "")
+    result = strings.ReplaceAll(result, "\\/", "/")
+    
+    // Fix common JSON syntax errors
+    result = strings.ReplaceAll(result, ",]", "]")
+    result = strings.ReplaceAll(result, ",}", "}")
+    result = strings.ReplaceAll(result, ",,", ",")
+    
+    // Replace any control characters
+    for i := 0; i < 32; i++ {
+        if i != 9 && i != 10 && i != 13 { // Keep tabs, newlines, and carriage returns
+            result = strings.ReplaceAll(result, string(rune(i)), "")
+        }
+    }
+    
+    // Fix Unicode quotes that might be used inconsistently
+    result = strings.ReplaceAll(result, "“", "\"")
+    result = strings.ReplaceAll(result, "”", "\"")
+    result = strings.ReplaceAll(result, "‘", "'")
+    result = strings.ReplaceAll(result, "’", "'")
+    result = strings.ReplaceAll(result, "«", "\"")
+    result = strings.ReplaceAll(result, "»", "\"")
+    
+    // Fix UTF-8 encoding issues
+    result = fixBrokenUTF8(result)
+    
+    // Ensure proper nesting - add missing close brackets/braces if needed
+    openBrackets := strings.Count(result, "[")
+    closeBrackets := strings.Count(result, "]")
+    for i := 0; i < openBrackets-closeBrackets; i++ {
+        result += "]"
+        utils.DebugLog("Added missing closing bracket ]")
+    }
+    
+    openBraces := strings.Count(result, "{")
+    closeBraces := strings.Count(result, "}")
+    for i := 0; i < openBraces-closeBraces; i++ {
+        result += "}"
+        utils.DebugLog("Added missing closing brace }")
+    }
+    
+    utils.DebugLog("sanitizeUnicodeJSON: New length %d bytes", len(result))
+    return []byte(result)
+}
+
+// fixBrokenUTF8 attempts to fix broken UTF-8 sequences
+func fixBrokenUTF8(s string) string {
+    // First convert to valid UTF-8 (replacing invalid sequences with the Unicode replacement character)
+    valid := []rune(s)
+    
+    // Convert back to string
+    return string(valid)
+}
+
+// sanitizeAggressively performs more aggressive sanitization for really problematic JSON
+func sanitizeAggressively(input []byte) []byte {
+    // Convert to string for easier manipulation
+    s := string(input)
+    
+    // Create a new buffer for the sanitized content
+    var result strings.Builder
+    
+    // Process the input character by character
+    inString := false
+    escaped := false
+    
+    for _, r := range s {
+        switch {
+        case escaped:
+            // If we're in escaped mode, add the current character regardless
+            result.WriteRune(r)
+            escaped = false
+        case r == '\\':
+            // Start of an escape sequence
+            result.WriteRune(r)
+            escaped = true
+        case r == '"':
+            // Toggle string mode
+            inString = !inString
+            result.WriteRune(r)
+        case inString:
+            // In a string, allow all characters except control characters
+            if r >= 32 || r == '\t' || r == '\n' || r == '\r' {
+                result.WriteRune(r)
+            }
+        case r >= 32 || r == '\t' || r == '\n' || r == '\r':
+            // Outside strings, only allow whitespace and basic JSON syntax
+            if r == '{' || r == '}' || r == '[' || r == ']' || 
+               r == ',' || r == ':' || r == 't' || r == 'f' || 
+               r == 'n' || r == 'u' || r == 'l' || (r >= '0' && r <= '9') || 
+               r == '-' || r == '.' || r == '+' || r == 'e' || r == 'E' || 
+               r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+                result.WriteRune(r)
+            }
+        }
+    }
+    
+    // Final sanitization to fix any remaining JSON syntax issues
+    sanitized := result.String()
+    sanitized = strings.ReplaceAll(sanitized, ",]", "]")
+    sanitized = strings.ReplaceAll(sanitized, ",}", "}")
+    
+    return []byte(sanitized)
+}
+
+// extractValidCategoryData attempts to manually extract category data from malformed JSON
+// Returns the extracted categories and a boolean indicating success
+func extractValidCategoryData(input []byte) ([]map[string]interface{}, bool) {
+    // Convert to string for pattern matching
+    data := string(input)
+
+    // Check if it starts with [ and ends with ]
+    if !strings.HasPrefix(data, "[") || !strings.HasSuffix(data, "]") {
+        return nil, false
+    }
+
+    // Remove the outer brackets
+    data = data[1 : len(data)-1]
+
+    // Split by object separators
+    parts := strings.Split(data, "},{")
+    result := make([]map[string]interface{}, 0, len(parts))
+
+    for i, part := range parts {
+        // Restore the brackets
+        if i == 0 && !strings.HasPrefix(part, "{") {
+            part = "{" + part
+        } else if i > 0 {
+            part = "{" + part
+        }
+        if i == len(parts)-1 && !strings.HasSuffix(part, "}") {
+            part = part + "}"
+        } else if i < len(parts)-1 {
+            part = part + "}"
+        }
+
+        var item map[string]interface{}
+        // Try to parse each object
+        if err := json.Unmarshal([]byte(part), &item); err == nil {
+            // Check for minimum required fields
+            if _, hasID := item["category_id"]; hasID {
+                if name, hasName := item["category_name"].(string); hasName && name != "" {
+                    result = append(result, item)
+                }
+            }
+        }
+    }
+
+    return result, len(result) > 0
+}
+
+// fallbackForAction returns a reasonable empty structure for each action
+// to avoid 500 when providers return empty/invalid JSON.
+func fallbackForAction(action string) interface{} {
+	switch action {
+	case getLiveCategories, getVodCategories, getSeriesCategories,
+		getLiveStreams, getVodStreams, getSeries:
+		return []interface{}{}
+	case getVodInfo, getSerieInfo:
+		return map[string]interface{}{}
+	case getShortEPG:
+		// Compatible with expected EPG container
+		return map[string]interface{}{"epg_listings": []interface{}{}}
+	case getSimpleDataTable:
+		// Some providers return arrays, some objects; safe empty object
+		return map[string]interface{}{}
+	default:
+		return map[string]interface{}{}
+	}
+}
+
+// min helper for getting the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

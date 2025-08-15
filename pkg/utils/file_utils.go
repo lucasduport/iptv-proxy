@@ -2,65 +2,14 @@ package utils
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/config"
 )
-
-// WriteResponseToFile saves API responses to files for debugging purposes
-// It creates a file in the configured cache directory with a timestamp and request details
-func WriteResponseToFile(ctx *gin.Context, data []byte, contentType string) {
-	// If no cache folder is configured, do nothing
-	if config.CacheFolder == "" {
-		return
-	}
-
-	// Extract path from URL for use in filename
-	path := ctx.Request.URL.Path
-	query := ctx.Request.URL.RawQuery
-
-	// Create a clean path string for the filename
-	cleanPath := strings.ReplaceAll(path, "/", "_")
-	if query != "" {
-		// Add abbreviated query to filename
-		if len(query) > 50 {
-			query = query[:50] + "..."
-		}
-		cleanPath += "_" + strings.ReplaceAll(query, "&", "_")
-	}
-
-	// Ensure filename is not too long
-	if len(cleanPath) > 100 {
-		cleanPath = cleanPath[:100]
-	}
-
-	// Create timestamp
-	timestamp := time.Now().Format("20060102_150405")
-
-	// Create filename
-	filename := filepath.Join(config.CacheFolder, fmt.Sprintf("%s_%s.json", timestamp, cleanPath))
-
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
-		ErrorLog("Failed to create cache directory: %v", err)
-		return
-	}
-
-	// Write data to file
-	if err := ioutil.WriteFile(filename, data, 0644); err != nil {
-		ErrorLog("Failed to write response to file: %v", err)
-		return
-	}
-	
-	DebugLog("Response saved to file: %s", filename)
-}
 
 func WriteResponseToFileWithOverwrite(ctx *gin.Context, resp interface{}, overwrite bool, contentType string, optionalURL ...string) {
 	// Define the cache directory

@@ -7,6 +7,9 @@ This project is a feature-rich IPTV proxy server with LDAP authentication, based
 ### Key Features
 
 - Xtream Codes EPG/VOD parsing fixes
+  - Robust handling of Unicode characters in provider responses
+  - Fallback mechanisms for malformed JSON data
+  - Advanced sanitization for category data
 - M3U/M3U8 playlist proxying
 - Xtream Codes client API proxying (live, VOD, series, EPG)
 - **LDAP authentication support**

@@ -5,26 +5,26 @@ package xtreamcodes
 
 // ServerInfo describes the state of the Xtream-Codes server.
 type ServerInfo struct {
-	HTTPSPort    FlexInt   `json:"https_port,string"`
-	Port         FlexInt   `json:"port,string"`
+	HTTPSPort    FlexInt   `json:"https_port"`           // removed ,string
+	Port         FlexInt   `json:"port"`                 // removed ,string
 	Process      bool      `json:"process"`
-	RTMPPort     FlexInt   `json:"rtmp_port,string"`
+	RTMPPort     FlexInt   `json:"rtmp_port"`            // removed ,string
 	Protocol     string    `json:"server_protocol"`
 	TimeNow      string    `json:"time_now"`
-	TimestampNow Timestamp `json:"timestamp_now,string"`
+	TimestampNow Timestamp `json:"timestamp_now"`        // removed ,string
 	Timezone     string    `json:"timezone"`
 	URL          string    `json:"url"`
 }
 
 // UserInfo is the current state of the user as it relates to the Xtream-Codes server.
 type UserInfo struct {
-	ActiveConnections    FlexInt            `json:"active_cons,string"`
+	ActiveConnections    FlexInt            `json:"active_cons"`          // removed ,string
 	AllowedOutputFormats []string           `json:"allowed_output_formats"`
 	Auth                 ConvertibleBoolean `json:"auth"`
 	CreatedAt            Timestamp          `json:"created_at"`
 	ExpDate              *Timestamp         `json:"exp_date"`
-	IsTrial              ConvertibleBoolean `json:"is_trial,string"`
-	MaxConnections       FlexInt            `json:"max_connections,string"`
+	IsTrial              ConvertibleBoolean `json:"is_trial"`             // removed ,string
+	MaxConnections       FlexInt            `json:"max_connections"`      // removed ,string
 	Message              string             `json:"message"`
 	Password             string             `json:"password"`
 	Status               string             `json:"status"`
@@ -39,7 +39,7 @@ type AuthenticationResponse struct {
 
 // Category describes a grouping of Stream.
 type Category struct {
-	ID     FlexInt `json:"category_id,string"`
+	ID     FlexInt `json:"category_id"` // removed ,string
 	Name   string  `json:"category_name"`
 	Parent FlexInt `json:"parent_id"`
 
@@ -50,7 +50,7 @@ type Category struct {
 // Stream is a streamble video source.
 type Stream struct {
 	Added              *Timestamp `json:"added"`
-	CategoryID         FlexInt    `json:"category_id,string"`
+	CategoryID         FlexInt    `json:"category_id"` // removed ,string
 	CategoryName       string     `json:"category_name"`
 	ContainerExtension string     `json:"container_extension"`
 	CustomSid          string     `json:"custom_sid"`
@@ -71,7 +71,7 @@ type Stream struct {
 type SeriesInfo struct {
 	BackdropPath   *JSONStringSlice `json:"backdrop_path,omitempty"`
 	Cast           string           `json:"cast"`
-	CategoryID     *FlexInt         `json:"category_id,string"`
+	CategoryID     *FlexInt         `json:"category_id"` // removed ,string
 	Cover          string           `json:"cover"`
 	Director       string           `json:"director"`
 	EpisodeRunTime string           `json:"episode_run_time"`
@@ -80,7 +80,7 @@ type SeriesInfo struct {
 	Name           string           `json:"name"`
 	Num            FlexInt          `json:"num"`
 	Plot           string           `json:"plot"`
-	Rating         FlexInt          `json:"rating,string"`
+	Rating         FlexInt          `json:"rating"` // removed ,string
 	Rating5        FlexFloat        `json:"rating_5based"`
 	ReleaseDate    string           `json:"releaseDate"`
 	SeriesID       FlexInt          `json:"series_id"`
@@ -138,7 +138,7 @@ type VideoOnDemandInfo struct {
 	} `json:"info"`
 	MovieData struct {
 		Added              Timestamp `json:"added"`
-		CategoryID         FlexInt   `json:"category_id,string"`
+		CategoryID         FlexInt   `json:"category_id"` // removed ,string
 		ContainerExtension string    `json:"container_extension"`
 		CustomSid          string    `json:"custom_sid"`
 		DirectSource       string    `json:"direct_source"`
@@ -156,13 +156,22 @@ type EPGInfo struct {
 	ChannelID      string             `json:"channel_id"`
 	Description    Base64Value        `json:"description"`
 	End            string             `json:"end"`
-	EPGID          FlexInt            `json:"epg_id,string"`
+	EPGID          FlexInt            `json:"epg_id"`       // removed ,string
 	HasArchive     ConvertibleBoolean `json:"has_archive"`
-	ID             FlexInt            `json:"id,string"`
+	ID             FlexInt            `json:"id"`           // removed ,string
 	Lang           string             `json:"lang"`
 	NowPlaying     ConvertibleBoolean `json:"now_playing"`
 	Start          string             `json:"start"`
 	StartTimestamp Timestamp          `json:"start_timestamp"`
 	StopTimestamp  Timestamp          `json:"stop_timestamp"`
 	Title          Base64Value        `json:"title"`
+
+	// Add raw JSON data field to handle parsing issues
+	Fields         []byte             `json:"-"`
 }
+
+// Define common field names constants for flexibility
+const (
+	StreamFieldID   = "stream_id"
+	StreamFieldType = "stream_type"
+)

@@ -19,6 +19,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,10 +84,27 @@ func (c *Config) xtreamGenerateM3u(ctx *gin.Context, extension string) (*m3u.Pla
 		return nil, utils.PrintErrorAndReturn(err)
 	}
 
-	cat, err := client.GetLiveCategories()
+	utils.DebugLog("========== GENERATING M3U PLAYLIST ==========")
+	utils.DebugLog("Requesting live categories...")
+	
+	// Use the robust Action method to get categories
+	catResp, httpCode, contentType, err := client.Action(c.ProxyConfig, "get_live_categories", url.Values{})
 	if err != nil {
+		utils.DebugLog("Failed to get live categories: %v", err)
 		return nil, utils.PrintErrorAndReturn(err)
 	}
+	
+	utils.DebugLog("Live categories response - HTTP Status: %d, Content-Type: %s", httpCode, contentType)
+	utils.DumpStructToLog("live_categories", catResp)
+
+	// Type assert the response to the expected format
+	catData, ok := catResp.([]interface{})
+	if !ok {
+		utils.DebugLog("Unexpected format for live categories: %T - %+v", catResp, catResp)
+		return nil, utils.PrintErrorAndReturn(fmt.Errorf("unexpected format for live categories: %T", catResp))
+	}
+	
+	utils.DebugLog("Found %d live categories", len(catData))
 
 	// this is specific to xtream API,
 	// prefix with "live" if there is an extension.
@@ -98,34 +117,82 @@ func (c *Config) xtreamGenerateM3u(ctx *gin.Context, extension string) (*m3u.Pla
 	var playlist = new(m3u.Playlist)
 	playlist.Tracks = make([]m3u.Track, 0)
 
-	for _, category := range cat {
-		live, err := client.GetLiveStreams(fmt.Sprint(category.ID))
-		if err != nil {
-			return nil, utils.PrintErrorAndReturn(err)
+	for i, categoryItem := range catData {
+		categoryMap, ok := categoryItem.(map[string]interface{})
+		if !ok {
+			utils.DebugLog("WARNING: Category item #%d is not a map: %T - %+v", i, categoryItem, categoryItem)
+			continue
 		}
 
-		for _, stream := range live {
-			track := m3u.Track{Name: stream.Name, Length: -1, URI: "", Tags: nil}
+		categoryID := fmt.Sprintf("%v", categoryMap["category_id"])
+		categoryName := fmt.Sprintf("%v", categoryMap["category_name"])
+		utils.DebugLog("Processing category: %s (ID: %s)", categoryName, categoryID)
+
+		// Use the robust Action method to get live streams for each category
+		utils.DebugLog("Requesting streams for category %s...", categoryID)
+		liveResp, httpCode, contentType, err := client.Action(c.ProxyConfig, "get_live_streams", url.Values{"category_id": {categoryID}})
+		if err != nil {
+			utils.DebugLog("Failed to get live streams for category %s: %v", categoryID, err)
+			return nil, utils.PrintErrorAndReturn(err)
+		}
+		
+		utils.DebugLog("Streams response - HTTP Status: %d, Content-Type: %s", httpCode, contentType)
+		utils.DumpStructToLog(fmt.Sprintf("streams_cat_%s", categoryID), liveResp)
+
+		liveData, ok := liveResp.([]interface{})
+		if !ok {
+			utils.DebugLog("WARNING: Unexpected format for streams in category '%s': %T", categoryName, liveResp)
+			continue
+		}
+
+		utils.DebugLog("Found %d streams in category: %s", len(liveData), categoryName)
+
+		for j, streamItem := range liveData {
+			streamMap, ok := streamItem.(map[string]interface{})
+			if !ok {
+				utils.DebugLog("WARNING: Stream #%d in category '%s' is not a map: %T", j, categoryName, streamItem)
+				continue
+			}
+
+			// Validate required fields
+			streamName, hasName := streamMap["name"].(string)
+			streamID, hasID := streamMap["stream_id"].(string)
+			
+			if !hasName || !hasID {
+				utils.DebugLog("WARNING: Stream missing required fields - Name: %v, ID: %v", streamMap["name"], streamMap["stream_id"])
+				continue
+			}
+
+			track := m3u.Track{
+				Name:   streamName,
+				Length: -1,
+				URI:    "",
+				Tags:   nil,
+			}
 
 			//TODO: Add more tag if needed.
-			if stream.EPGChannelID != "" {
-				track.Tags = append(track.Tags, m3u.Tag{Name: "tvg-id", Value: stream.EPGChannelID})
+			if epgID, ok := streamMap["epg_channel_id"].(string); ok && epgID != "" {
+				track.Tags = append(track.Tags, m3u.Tag{Name: "tvg-id", Value: epgID})
 			}
-			if stream.Name != "" {
-				track.Tags = append(track.Tags, m3u.Tag{Name: "tvg-name", Value: stream.Name})
+			if name, ok := streamMap["name"].(string); ok && name != "" {
+				track.Tags = append(track.Tags, m3u.Tag{Name: "tvg-name", Value: name})
 			}
-			if stream.Icon != "" {
-				track.Tags = append(track.Tags, m3u.Tag{Name: "tvg-logo", Value: stream.Icon})
+			if logo, ok := streamMap["stream_icon"].(string); ok && logo != "" {
+				track.Tags = append(track.Tags, m3u.Tag{Name: "tvg-logo", Value: logo})
 			}
-			if category.Name != "" {
-				track.Tags = append(track.Tags, m3u.Tag{Name: "group-title", Value: category.Name})
+			if categoryName != "" {
+				track.Tags = append(track.Tags, m3u.Tag{Name: "group-title", Value: categoryName})
 			}
 
-			track.URI = fmt.Sprintf("%s/%s%s/%s/%s%s", c.XtreamBaseURL, prefix, c.XtreamUser, c.XtreamPassword, fmt.Sprint(stream.ID), extension)
+			streamID = fmt.Sprintf("%v", streamMap["stream_id"])
+			track.URI = fmt.Sprintf("%s/%s%s/%s/%s%s", c.XtreamBaseURL, prefix, c.XtreamUser, c.XtreamPassword, streamID, extension)
+			
+			utils.DebugLog("Added stream: %s (ID: %s)", track.Name, streamID)
 			playlist.Tracks = append(playlist.Tracks, track)
 		}
 	}
 
+	utils.DebugLog("Playlist generation complete: %d total tracks", len(playlist.Tracks))
 	return playlist, nil
 }
 
@@ -173,8 +240,13 @@ func (c *Config) xtreamGet(ctx *gin.Context) {
 		log.Printf("[iptv-proxy] %v | %s | xtream cache m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
 		xtreamM3uCacheLock.RUnlock()
 		playlist, err := m3u.Parse(m3uURL.String())
+		// --- FIX: Check for empty playlist ---
 		if err != nil {
 			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			return
+		}
+		if len(playlist.Tracks) == 0 {
+			ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty playlist")))
 			return
 		}
 		if err := c.cacheXtreamM3u(&playlist, m3uURL.String()); err != nil {
@@ -259,8 +331,58 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 		action = q["action"][0]
 	}
 
+	// Handle login (no action) locally to avoid upstream FlexInt unmarshaling issues
+	if strings.TrimSpace(action) == "" {
+		protocol := "http"
+		if c.ProxyConfig.HTTPS {
+			protocol = "https"
+		}
+
+		// Use numeric strings for fields usually tagged with ,string in Xtream
+		now := time.Now()
+		nowUnix := strconv.FormatInt(now.Unix(), 10)
+		// Choose an exp_date far in the future or "0". Using a year ahead for compatibility.
+		expDate := strconv.FormatInt(now.Add(365*24*time.Hour).Unix(), 10)
+
+		loginResp := map[string]interface{}{
+			"user_info": map[string]interface{}{
+				"username":               c.User.String(),
+				"password":               c.Password.String(),
+				"message":                "",
+				"auth":                   "1",
+				"status":                 "Active",
+				"exp_date":               expDate,   // numeric string to avoid client FormatException
+				"is_trial":               "0",
+				"active_cons":            "0",       // numeric string
+				"created_at":             nowUnix,   // numeric string
+				"max_connections":        "1",       // numeric string
+				"allowed_output_formats": []string{"m3u8", "ts"},
+			},
+			"server_info": map[string]interface{}{
+				"url":             fmt.Sprintf("%s://%s", protocol, c.HostConfig.Hostname),
+				"port":            strconv.Itoa(c.AdvertisedPort), // numeric string
+				"https_port":      strconv.Itoa(c.AdvertisedPort), // numeric string
+				"server_protocol": protocol,
+				"rtmp_port":       strconv.Itoa(c.AdvertisedPort), // numeric string
+				"timezone":        "UTC",
+				"timestamp_now":   nowUnix,                         // numeric string
+				"time_now":        now.UTC().Format("2006-01-02 15:04:05"),
+			},
+		}
+
+		log.Printf("[iptv-proxy] %v | %s |Action\tlogin (local)\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+
+		if config.CacheFolder != "" {
+			readableJSON, _ := json.Marshal(loginResp)
+			filename := fmt.Sprintf("login_%s.json", time.Now().Format("20060102_150405"))
+			utils.WriteResponseToFile(filename, readableJSON, "application/json")
+		}
+
+		ctx.JSON(http.StatusOK, loginResp)
+		return
+	}
+
 	client, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, ctx.Request.UserAgent())
-	
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
 		return
@@ -272,13 +394,27 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 		return
 	}
 
+	if contentType == "application/json" {
+		// If resp is a string, check if it's empty or only whitespace
+		if s, ok := resp.(string); ok && strings.TrimSpace(s) == "" {
+			ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty JSON response for action: %s", action)))
+			return
+		}
+		// If resp is a []byte, check if it's empty or only whitespace
+		if b, ok := resp.([]byte); ok && len(bytes.TrimSpace(b)) == 0 {
+			ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty JSON response for action: %s", action)))
+			return
+		}
+	}
+
 	log.Printf("[iptv-proxy] %v | %s |Action\t%s\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP(), action)
 
 	processedResp := ProcessResponse(resp)
 
 	if config.CacheFolder != "" {
 		readableJSON, _ := json.Marshal(processedResp)
-		utils.WriteResponseToFile(ctx, readableJSON, contentType)
+		filename := fmt.Sprintf("%s_%s.json", action, time.Now().Format("20060102_150405"))
+		utils.WriteResponseToFile(filename, readableJSON, contentType)
 	}
 
 	ctx.JSON(http.StatusOK, processedResp)
