@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,12 +34,25 @@ type SessionManager struct {
 
 // StreamBuffer handles buffering and distribution of stream data
 type StreamBuffer struct {
-	streamID     string
-	upstreamURL  string
-	active       bool
-	clients      map[string]chan []byte
-	stopChan     chan struct{}
-	clientsLock  sync.RWMutex
+	streamID    string
+	upstreamURL string
+	active      bool
+
+	// Per-client data channels and lifecycle
+	clients     map[string]chan []byte
+	clientDone  map[string]chan struct{}
+	clientsLock sync.RWMutex
+
+	// Stop signal for upstream reader
+	stopChan chan struct{}
+
+	// Ring buffer allowing clients to read at their own pace
+	ringCap     int
+	head        uint64               // next sequence number to write
+	ring        [][]byte             // ring storage
+	bufMu       sync.Mutex
+	cond        *sync.Cond
+	clientIndex map[string]uint64 // per-client next sequence to read
 }
 
 // NewSessionManager creates a new session manager
@@ -54,11 +68,13 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		streamTimeout:   2 * time.Minute,  // Time after which an unused stream is closed
 		tempLinkTimeout: 24 * time.Hour,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			// No global Timeout: long-running streams must not be cut after 60s
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 20,
 				IdleConnTimeout:     90 * time.Second,
+				ForceAttemptHTTP2:   false, // avoid HTTP/2 flow control stalls with IPTV providers
+				DisableCompression:  true,  // avoid gzip on video streams
 			},
 		},
 	}
@@ -190,9 +206,9 @@ func (sm *SessionManager) GetUserSession(username string) *types.UserSession {
 }
 
 // RequestStream handles a new stream request and implements connection multiplexing
-func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTitle string, 
+func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTitle string,
 	upstreamURL *url.URL) (*StreamBuffer, error) {
-	
+
 	// Get user session, creating if necessary
 	var userSession *types.UserSession
 	sm.userLock.Lock()
@@ -229,27 +245,40 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	// Check if this stream is already active
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
-	
+
 	var streamBuffer *StreamBuffer
-	
-	// If this stream already exists, add the user as a viewer
+
+	// If this stream already exists, add the user as a viewer and start a per-client reader
 	if existingBuffer, exists := sm.streamBuffers[streamID]; exists && existingBuffer.active {
 		utils.InfoLog("User %s joined existing stream %s", username, streamID)
-		
-		// Add user to existing stream session
+
 		if streamSession, exists := sm.streamSessions[streamID]; exists {
 			streamSession.AddViewer(username)
+			streamSession.LastRequested = time.Now()
 		}
-		
-		// Add user as a client to the buffer
-		clientChan := make(chan []byte, 10)
+
+		// Add user as a client
+		clientChan := make(chan []byte, 256) // larger buffer to smooth jitter
 		existingBuffer.clientsLock.Lock()
+		if existingBuffer.clientDone == nil {
+			existingBuffer.clientDone = make(map[string]chan struct{})
+		}
 		existingBuffer.clients[username] = clientChan
+		existingBuffer.clientDone[username] = make(chan struct{})
+		// Start client goroutine at current head
+		existingBuffer.bufMu.Lock()
+		if existingBuffer.clientIndex == nil {
+			existingBuffer.clientIndex = make(map[string]uint64)
+		}
+		existingBuffer.clientIndex[username] = existingBuffer.head
+		existingBuffer.bufMu.Unlock()
 		existingBuffer.clientsLock.Unlock()
-		
+
+		go sm.serveClient(existingBuffer, username)
+
 		return existingBuffer, nil
 	}
-	
+
 	// Create a new stream session
 	streamSession := &types.StreamSession{
 		StreamID:      streamID,
@@ -263,53 +292,142 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	}
 	streamSession.AddViewer(username)
 	sm.streamSessions[streamID] = streamSession
-	
+
 	// Create a new stream buffer
 	streamBuffer = &StreamBuffer{
 		streamID:    streamID,
 		upstreamURL: upstreamURL.String(),
 		active:      true,
 		clients:     make(map[string]chan []byte),
+		clientDone:  make(map[string]chan struct{}),
 		stopChan:    make(chan struct{}),
+		ringCap:     256,                         // last 256 chunks retained
+		ring:        make([][]byte, 256),         // preallocate
+		clientIndex: make(map[string]uint64),
 	}
-	
+	streamBuffer.cond = sync.NewCond(&streamBuffer.bufMu)
+
 	// Add the requesting user as the first client
-	clientChan := make(chan []byte, 10)
+	clientChan := make(chan []byte, 256)
 	streamBuffer.clients[username] = clientChan
-	
+	streamBuffer.clientDone[username] = make(chan struct{})
+	streamBuffer.clientIndex[username] = 0 // will follow head as it grows
+
 	sm.streamBuffers[streamID] = streamBuffer
-	
-	// Start the stream goroutine
+
+	// Start the upstream reader goroutine
 	go sm.streamToClients(streamBuffer, upstreamURL)
-	
+	// Start the per-client reader
+	go sm.serveClient(streamBuffer, username)
+
 	// Record in database
 	if sm.db != nil {
 		_, err := sm.db.AddStreamHistory(
-			username, streamID, streamType, streamTitle, 
+			username, streamID, streamType, streamTitle,
 			userSession.IPAddress, userSession.UserAgent,
 		)
 		if err != nil {
 			utils.ErrorLog("Failed to record stream history: %v", err)
 		}
 	}
-	
+
 	utils.InfoLog("Started new stream %s for user %s", streamID, username)
 	return streamBuffer, nil
 }
 
-// streamToClients fetches the stream from upstream and distributes to all clients
+// serveClient reads from the ring buffer and sends to a specific client's channel
+func (sm *SessionManager) serveClient(buffer *StreamBuffer, username string) {
+	ch := func() chan []byte {
+		buffer.clientsLock.RLock()
+		defer buffer.clientsLock.RUnlock()
+		return buffer.clients[username]
+	}()
+	done := func() chan struct{} {
+		buffer.clientsLock.RLock()
+		defer buffer.clientsLock.RUnlock()
+		return buffer.clientDone[username]
+	}()
+
+	var next uint64
+	buffer.bufMu.Lock()
+	next = buffer.clientIndex[username]
+	buffer.bufMu.Unlock()
+
+	for {
+		// Wait for data availability or done
+		buffer.bufMu.Lock()
+		for next == buffer.head && buffer.active {
+			buffer.cond.Wait()
+		}
+		if !buffer.active {
+			buffer.bufMu.Unlock()
+			break
+		}
+		// Handle overflow: if ring wrapped and client is too far behind, fast-forward
+		if buffer.head > uint64(buffer.ringCap) && next < buffer.head-uint64(buffer.ringCap) {
+			next = buffer.head - uint64(buffer.ringCap)
+		}
+		chunk := buffer.ring[next%uint64(buffer.ringCap)]
+		next++
+		buffer.clientIndex[username] = next
+		buffer.bufMu.Unlock()
+
+		// Check if client asked to stop
+		select {
+		case <-done:
+			goto EXIT
+		default:
+		}
+
+		// Deliver chunk (block if client is slow; independent from other clients)
+		out := ch
+		if out == nil {
+			goto EXIT
+		}
+		select {
+		case out <- chunk:
+			// ok
+		case <-done:
+			goto EXIT
+		}
+	}
+
+EXIT:
+	// Close the outgoing data channel to signal HTTP writer to finish
+	buffer.clientsLock.Lock()
+	if ch, ok := buffer.clients[username]; ok {
+		close(ch)
+		delete(buffer.clients, username)
+	}
+	if d, ok := buffer.clientDone[username]; ok {
+		close(d) // idempotent close guarded by ok if already closed elsewhere
+		delete(buffer.clientDone, username)
+	}
+	buffer.clientsLock.Unlock()
+}
+
+// streamToClients fetches the stream from upstream and fills the ring buffer
 func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url.URL) {
 	utils.DebugLog("Starting stream from %s", upstreamURL.String())
-	
-	req, err := http.NewRequest("GET", upstreamURL.String(), nil)
+
+	// Create a context that cancels when the stream is stopped
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-buffer.stopChan
+		cancel()
+	}()
+
+	// Bind the upstream request to the cancelable context
+	req, err := http.NewRequestWithContext(ctx, "GET", upstreamURL.String(), nil)
 	if err != nil {
 		utils.ErrorLog("Failed to create request: %v", err)
 		return
 	}
-	
+
 	// Set common headers for the request
 	req.Header.Set("User-Agent", "IPTV-Proxy")
-	
+
 	resp, err := sm.httpClient.Do(req)
 	if err != nil {
 		utils.ErrorLog("Failed to connect to upstream: %v", err)
@@ -317,57 +435,59 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	// Check if response is successful
 	if resp.StatusCode != http.StatusOK {
-		utils.ErrorLog("Upstream returned status %d for stream %s", 
+		utils.ErrorLog("Upstream returned status %d for stream %s",
 			resp.StatusCode, buffer.streamID)
 		sm.stopStream(buffer.streamID)
 		return
 	}
-	
-	// Stream data to all clients
+
+	// Stream data into ring buffer
 	buffer.active = true
-	
-	// Use a larger buffer for better performance
-	const bufferSize = 64 * 1024  // 64KB buffer
-	dataBuffer := make([]byte, bufferSize)
-	
+
+	const chunkSize = 128 * 1024 // was 64KB; larger chunks reduce per-write overhead
+	dataBuffer := make([]byte, chunkSize)
+
 	for {
+		// Stop requested
 		select {
 		case <-buffer.stopChan:
 			utils.DebugLog("Stream %s stopped", buffer.streamID)
 			return
 		default:
-			// Read from upstream
-			n, err := resp.Body.Read(dataBuffer)
-			if err != nil {
-				if err != io.EOF {
-					utils.ErrorLog("Error reading from upstream: %v", err)
-				}
-				sm.stopStream(buffer.streamID)
-				return
-			}
-			
-			if n > 0 {
-				// Copy the data to avoid race conditions when sending to multiple clients
-				dataCopy := make([]byte, n)
-				copy(dataCopy, dataBuffer[:n])
-				
-				// Send to all connected clients
-				buffer.clientsLock.RLock()
-				for username, clientChan := range buffer.clients {
-					// Non-blocking send, skip if client can't keep up
-					select {
-					case clientChan <- dataCopy:
-						// Successfully sent
-					default:
-						utils.DebugLog("Client %s buffer full, skipping chunk", username)
-					}
-				}
-				buffer.clientsLock.RUnlock()
-			}
 		}
+
+		n, rerr := resp.Body.Read(dataBuffer)
+		if rerr != nil {
+			if rerr != io.EOF && ctx.Err() == nil {
+				utils.ErrorLog("Error reading from upstream: %v", rerr)
+			}
+			sm.stopStream(buffer.streamID)
+			return
+		}
+		if n <= 0 {
+			continue
+		}
+
+		// Copy to ring buffer
+		chunk := make([]byte, n)
+		copy(chunk, dataBuffer[:n])
+
+		// Append to ring and notify clients
+		buffer.bufMu.Lock()
+		buffer.ring[buffer.head%uint64(buffer.ringCap)] = chunk
+		buffer.head++
+		buffer.bufMu.Unlock()
+		buffer.cond.Broadcast()
+
+		// Touch stream LastRequested to avoid cleanup timeout while data flows
+		sm.streamLock.Lock()
+		if ss, ok := sm.streamSessions[buffer.streamID]; ok {
+			ss.LastRequested = time.Now()
+		}
+		sm.streamLock.Unlock()
 	}
 }
 
@@ -375,15 +495,15 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 func (sm *SessionManager) GetClientChannel(streamID, username string) (chan []byte, bool) {
 	sm.streamLock.RLock()
 	defer sm.streamLock.RUnlock()
-	
+
 	buffer, exists := sm.streamBuffers[streamID]
 	if !exists || !buffer.active {
 		return nil, false
 	}
-	
+
 	buffer.clientsLock.RLock()
 	defer buffer.clientsLock.RUnlock()
-	
+
 	channel, exists := buffer.clients[username]
 	return channel, exists
 }
@@ -392,7 +512,7 @@ func (sm *SessionManager) GetClientChannel(streamID, username string) (chan []by
 func (sm *SessionManager) RemoveClient(streamID, username string) {
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
-	
+
 	// Update user session
 	sm.userLock.Lock()
 	if userSession, exists := sm.userSessions[username]; exists && userSession.StreamID == streamID {
@@ -400,69 +520,61 @@ func (sm *SessionManager) RemoveClient(streamID, username string) {
 		userSession.StreamType = ""
 	}
 	sm.userLock.Unlock()
-	
-	// Remove from stream buffer
+
+	// Signal client goroutine to stop; it will close the data channel
 	buffer, exists := sm.streamBuffers[streamID]
 	if !exists {
 		return
 	}
-	
+
 	buffer.clientsLock.Lock()
-	if ch, found := buffer.clients[username]; found {
-		close(ch)
-		delete(buffer.clients, username)
+	if d, ok := buffer.clientDone[username]; ok {
+		close(d)
+		delete(buffer.clientDone, username)
 	}
+	// don’t close buffer.clients[username] here; goroutine closes it
+	delete(buffer.clients, username)
 	buffer.clientsLock.Unlock()
-	
-	// Remove from stream session
+
+	// Remove from stream session and stop the stream if last viewer
 	streamSession, exists := sm.streamSessions[streamID]
 	if !exists {
 		return
 	}
-	
-	// If this was the last viewer, stop the stream
 	if !streamSession.RemoveViewer(username) && buffer.active {
 		sm.stopStream(streamID)
 	}
-	
+
 	utils.InfoLog("User %s removed from stream %s", username, streamID)
 }
 
 // stopStream stops an active stream
 func (sm *SessionManager) stopStream(streamID string) {
 	utils.InfoLog("Stopping stream %s", streamID)
-	
-	// Get the buffer
+
 	buffer, exists := sm.streamBuffers[streamID]
 	if !exists || !buffer.active {
 		return
 	}
-	
-	// Signal the streaming goroutine to stop
+
+	// Signal upstream goroutine to stop
 	close(buffer.stopChan)
 	buffer.active = false
-	
-	// Close all client channels
+
+	// Signal all clients to stop; each goroutine closes its data channel
 	buffer.clientsLock.Lock()
-	for username, ch := range buffer.clients {
-		close(ch)
-		
-		// Also update the user session
-		sm.userLock.Lock()
-		if userSession, exists := sm.userSessions[username]; exists && userSession.StreamID == streamID {
-			userSession.StreamID = ""
-			userSession.StreamType = ""
-		}
-		sm.userLock.Unlock()
+	for username, d := range buffer.clientDone {
+		close(d)
+		delete(buffer.clientDone, username)
 	}
 	buffer.clients = make(map[string]chan []byte)
 	buffer.clientsLock.Unlock()
-	
+
 	// Update the stream session
 	if streamSession, exists := sm.streamSessions[streamID]; exists {
 		streamSession.Active = false
 	}
-	
+
 	utils.InfoLog("Stream %s stopped and all clients disconnected", streamID)
 }
 

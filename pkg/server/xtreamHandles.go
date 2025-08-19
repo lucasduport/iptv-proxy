@@ -815,63 +815,63 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 	}
 	channel := s[0]
 
-	url, err := getHlsRedirectURL(channel)
+	redirURL, err := getHlsRedirectURL(channel)
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
 		return
 	}
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s://%s/hls/%s/%s", url.Scheme, url.Host, ctx.Param("token"), ctx.Param("chunk")), nil)
-	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+	req, reqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET",
+		fmt.Sprintf("%s://%s/hls/%s/%s", redirURL.Scheme, redirURL.Host, ctx.Param("token"), ctx.Param("chunk")), nil)
+	if reqErr != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(reqErr)) // nolint: errcheck
 		return
 	}
 
 	mergeHttpHeader(req.Header, ctx.Request.Header)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+	resp, doErr := http.DefaultClient.Do(req)
+	if doErr != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(doErr)) // nolint: errcheck
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusFound {
-		location, err := resp.Location()
-		if err != nil {
-			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		loc, locErr := resp.Location()
+		if locErr != nil {
+			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(locErr)) // nolint: errcheck
 			return
 		}
 		id := ctx.Param("id")
-		if strings.Contains(location.String(), id) {
+		if strings.Contains(loc.String(), id) {
 			hlsChannelsRedirectURLLock.Lock()
-			hlsChannelsRedirectURL[id] = *location
+			hlsChannelsRedirectURL[id] = *loc
 			hlsChannelsRedirectURLLock.Unlock()
 
-			hlsReq, err := http.NewRequest("GET", location.String(), nil)
-			if err != nil {
-				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			hlsReq, hlsReqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", loc.String(), nil)
+			if hlsReqErr != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsReqErr)) // nolint: errcheck
 				return
 			}
 
 			mergeHttpHeader(hlsReq.Header, ctx.Request.Header)
 
-			hlsResp, err := http.DefaultClient.Do(hlsReq)
-			if err != nil {
-				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			hlsResp, hlsDoErr := http.DefaultClient.Do(hlsReq)
+			if hlsDoErr != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsDoErr)) // nolint: errcheck
 				return
 			}
 			defer hlsResp.Body.Close()
 
-			b, err := ioutil.ReadAll(hlsResp.Body)
-			if err != nil {
-				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			b, readErr := ioutil.ReadAll(hlsResp.Body)
+			if readErr != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(readErr)) // nolint: errcheck
 				return
 			}
 			body := string(b)
-			
+
 			// Replace upstream Xtream credentials with proxy user credentials in response
-			// This doesn't affect the upstream requests, only what the client sees
 			body = strings.ReplaceAll(body, "/"+c.XtreamUser.String()+"/"+c.XtreamPassword.String()+"/", "/"+c.User.String()+"/"+c.Password.String()+"/")
 
 			utils.DebugLog("HLS stream response modified to use proxy credentials for client URLs")
@@ -886,49 +886,6 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 
 	utils.DebugLog("HLS stream response status: %d", resp.StatusCode)
 	ctx.Status(resp.StatusCode)
-}
-
-func (c *Config) xtreamHlsrStream(ctx *gin.Context) {
-	channel := ctx.Param("channel")
-
-	url, err := getHlsRedirectURL(channel)
-	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
-		return
-	}
-
-	req, err := url.Parse(
-		fmt.Sprintf(
-			"%s://%s/hlsr/%s/%s/%s/%s/%s/%s",
-			url.Scheme,
-			url.Host,
-			ctx.Param("token"),
-			c.XtreamUser,     // Always use Xtream credentials
-			c.XtreamPassword, // Always use Xtream credentials
-			ctx.Param("channel"),
-			ctx.Param("hash"),
-			ctx.Param("chunk"),
-		),
-	)
-
-	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
-		return
-	}
-
-	c.xtreamStream(ctx, req)
-}
-
-func getHlsRedirectURL(channel string) (*url.URL, error) {
-	hlsChannelsRedirectURLLock.RLock()
-	defer hlsChannelsRedirectURLLock.RUnlock()
-
-	url, ok := hlsChannelsRedirectURL[channel+".m3u8"]
-	if !ok {
-		return nil, utils.PrintErrorAndReturn(errors.New("HSL redirect url not found"))
-	}
-
-	return &url, nil
 }
 
 func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
@@ -939,57 +896,56 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 		},
 	}
 
-	req, err := http.NewRequest("GET", oriURL.String(), nil)
-	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+	req, reqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", oriURL.String(), nil)
+	if reqErr != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(reqErr)) // nolint: errcheck
 		return
 	}
 
 	mergeHttpHeader(req.Header, ctx.Request.Header)
 
-	resp, err := client.Do(req)
-	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+	resp, doErr := client.Do(req)
+	if doErr != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(doErr)) // nolint: errcheck
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusFound {
-		location, err := resp.Location()
-		if err != nil {
-			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		loc, locErr := resp.Location()
+		if locErr != nil {
+			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(locErr)) // nolint: errcheck
 			return
 		}
 		id := ctx.Param("id")
-		if strings.Contains(location.String(), id) {
+		if strings.Contains(loc.String(), id) {
 			hlsChannelsRedirectURLLock.Lock()
-			hlsChannelsRedirectURL[id] = *location
+			hlsChannelsRedirectURL[id] = *loc
 			hlsChannelsRedirectURLLock.Unlock()
 
-			hlsReq, err := http.NewRequest("GET", location.String(), nil)
-			if err != nil {
-				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			hlsReq, hlsReqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", loc.String(), nil)
+			if hlsReqErr != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsReqErr)) // nolint: errcheck
 				return
 			}
 
 			mergeHttpHeader(hlsReq.Header, ctx.Request.Header)
 
-			hlsResp, err := client.Do(hlsReq)
-			if err != nil {
-				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			hlsResp, hlsDoErr := client.Do(hlsReq)
+			if hlsDoErr != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsDoErr)) // nolint: errcheck
 				return
 			}
 			defer hlsResp.Body.Close()
 
-			b, err := ioutil.ReadAll(hlsResp.Body)
-			if err != nil {
-				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			b, readErr := ioutil.ReadAll(hlsResp.Body)
+			if readErr != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(readErr)) // nolint: errcheck
 				return
 			}
 			body := string(b)
-			
+
 			// Replace upstream Xtream credentials with proxy user credentials in response
-			// This doesn't affect the upstream requests, only what the client sees
 			body = strings.ReplaceAll(body, "/"+c.XtreamUser.String()+"/"+c.XtreamPassword.String()+"/", "/"+c.User.String()+"/"+c.Password.String()+"/")
 
 			utils.DebugLog("HLS stream response modified to use proxy credentials for client URLs")
@@ -1004,4 +960,47 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 
 	utils.DebugLog("HLS stream response status: %d", resp.StatusCode)
 	ctx.Status(resp.StatusCode)
+}
+
+// Added handler expected by routes.go for HLSR path; delegates to hlsXtreamStream
+func (c *Config) xtreamHlsrStream(ctx *gin.Context) {
+	channel := ctx.Param("channel")
+
+	redirURL, err := getHlsRedirectURL(channel)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+
+	nextURL, parseErr := url.Parse(
+		fmt.Sprintf(
+			"%s://%s/hlsr/%s/%s/%s/%s/%s/%s",
+			redirURL.Scheme,
+			redirURL.Host,
+			ctx.Param("token"),
+			c.XtreamUser,     // Always use Xtream credentials
+			c.XtreamPassword, // Always use Xtream credentials
+			ctx.Param("channel"),
+			ctx.Param("hash"),
+			ctx.Param("chunk"),
+		),
+	)
+	if parseErr != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(parseErr)) // nolint: errcheck
+		return
+	}
+
+	c.hlsXtreamStream(ctx, nextURL)
+}
+
+// Restore helper used by HLS handlers
+func getHlsRedirectURL(channel string) (*url.URL, error) {
+	hlsChannelsRedirectURLLock.RLock()
+	defer hlsChannelsRedirectURLLock.RUnlock()
+
+	u, ok := hlsChannelsRedirectURL[channel+".m3u8"]
+	if !ok {
+		return nil, utils.PrintErrorAndReturn(errors.New("HSL redirect url not found"))
+	}
+	return &u, nil
 }

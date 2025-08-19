@@ -24,6 +24,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -88,13 +89,27 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 	utils.DebugLog("-> Streaming request URL: %s", ctx.Request.URL)
 	utils.DebugLog("-> Proxying to upstream URL: %s", oriURL.String())
 
-	// Configure HTTP client with reasonable timeout
-	client := &http.Client{
-		Timeout: 30 * time.Second,
+	// Configure HTTP transport suitable for long-lived streaming
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	// Prepare the upstream request
-	req, err := http.NewRequest("GET", oriURL.String(), nil)
+	// No global Timeout; let the stream run as long as the client stays connected
+	client := &http.Client{
+		Transport: transport,
+	}
+
+	// Prepare the upstream request (bound to client context so it cancels if client disconnects)
+	req, err := http.NewRequestWithContext(ctx.Request.Context(), "GET", oriURL.String(), nil)
 	if err != nil {
 		utils.ErrorLog("Failed to create request: %v", err)
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
@@ -114,16 +129,41 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 	defer resp.Body.Close()
 
 	utils.DebugLog("-> Upstream response status: %d", resp.StatusCode)
-	
+
 	// Copy response headers and status code
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
 	ctx.Status(resp.StatusCode)
-	
-	// Stream the response body to the client
-	ctx.Stream(func(w io.Writer) bool {
-		io.Copy(w, resp.Body) // nolint: errcheck
-		return false
-	})
+
+	// Stream the response body to the client with flushes
+	w := ctx.Writer
+	buf := make([]byte, 64*1024)
+
+	for {
+		// Respect client cancellation
+		select {
+		case <-ctx.Request.Context().Done():
+			utils.DebugLog("Client cancelled stream for URL: %s", ctx.Request.URL)
+			return
+		default:
+		}
+
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				utils.DebugLog("Client write error: %v", werr)
+				return
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+		if rerr != nil {
+			if rerr != io.EOF {
+				utils.DebugLog("Upstream read error: %v", rerr)
+			}
+			return
+		}
+	}
 }
 
 type values []string

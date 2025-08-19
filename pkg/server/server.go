@@ -456,7 +456,23 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	}
 
 	// Set appropriate headers based on content type
-	ctx.Header("Content-Type", "video/mp4") // Default, may be overridden
+	// ctx.Header("Content-Type", "video/mp4") // Default, may be overridden
+	// Replace with smarter content-type and no-buffering headers
+	contentType := "application/octet-stream"
+	ext := strings.ToLower(path.Ext(targetURL.Path))
+	if strings.Contains(p, "/live/") || ext == ".ts" {
+		contentType = "video/mp2t"
+	} else if ext == ".m3u8" {
+		contentType = "application/vnd.apple.mpegurl"
+	} else if ext == ".mp4" {
+		contentType = "video/mp4"
+	}
+	ctx.Header("Content-Type", contentType)
+	// Disable intermediary buffering and keep connection alive
+	ctx.Header("Cache-Control", "no-store")
+	ctx.Header("Pragma", "no-cache")
+	ctx.Header("Connection", "keep-alive")
+	ctx.Header("X-Accel-Buffering", "no")
 
 	// Stream data to the client
 	utils.InfoLog("Starting multiplexed stream for user %s (stream %s)", username, streamID)
@@ -476,6 +492,11 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 			utils.DebugLog("Client write error for user %s (stream %s): %v", username, streamID, err)
 			c.sessionManager.RemoveClient(streamID, username)
 			return false
+		}
+
+		// Force immediate delivery to client to avoid periodic buffering
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
 		}
 
 		return true
