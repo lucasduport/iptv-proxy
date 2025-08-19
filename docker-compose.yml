@@ -1,5 +1,3 @@
-version: "3"
-
 services:
   iptv-proxy:
     image: lucasduport/iptv-proxy:latest
@@ -46,8 +44,63 @@ services:
       LDAP_GROUP_ATTRIBUTE: "memberOf" # LDAP attribute for group membership
       LDAP_REQUIRED_GROUP: "iptv"      # Group required for authentication
 
+      # Database Configuration (Postgres only)
+      DB_TYPE: "postgres"              # Database type: sqlite or postgres
+      DB_HOST: "db"                    # Postgres hostname 
+      DB_PORT: "5432"                  # Postgres port
+      DB_NAME: "iptvproxy"             # Postgres database name
+      DB_USER: "iptvproxy"             # Postgres username
+      DB_PASSWORD: "iptvproxypass"     # Postgres password
+
+      # Discord Bot Configuration
+      DISCORD_BOT_ENABLED: "false"     # Enable Discord bot integration
+      DISCORD_BOT_TOKEN: ""            # Discord bot token
+      DISCORD_BOT_PREFIX: "!"          # Command prefix for Discord bot
+      DISCORD_ADMIN_ROLE_ID: ""        # Discord role ID for admin commands
+      DISCORD_API_URL: ""              # API URL for Discord bot (defaults to hostname)
+
+      # Multiplexing and Session Management
+      MAX_CONNECTIONS_PER_USER: "1"    # Maximum simultaneous streams per user
+      SESSION_TIMEOUT_MINUTES: "30"    # User session timeout in minutes
+      STREAM_TIMEOUT_MINUTES: "2"      # Stream timeout (after all users disconnect)
+      TEMP_LINK_HOURS: "24"            # Temporary download link expiration in hours
+
     volumes:
       - iptv_config:/root/.iptv-proxy  # Persistent configuration storage
+      - iptv_data:/data                # Database and other persistent data
+
+    depends_on:
+      - db
+      
+  # PostgreSQL database
+  db:
+    image: postgres:14-alpine
+    container_name: iptv-proxy-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: iptvproxy
+      POSTGRES_USER: iptvproxy
+      POSTGRES_PASSWORD: iptvproxypass
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Uncomment to expose PostgreSQL port for external access
+    # ports:
+    #  - "5432:5432"
+    
+  # Adminer for database management (optional)
+  adminer:
+    image: adminer
+    container_name: iptv-proxy-adminer
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    depends_on:
+      - db
 
 volumes:
   iptv_config:
+  iptv_data:
+  postgres_data:

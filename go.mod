@@ -5,13 +5,18 @@ require (
 	github.com/gin-contrib/cors v0.0.0-20190226021855-50921afdc5c1
 	github.com/gin-gonic/gin v1.9.0
 	github.com/go-ldap/ldap/v3 v3.4.4
-	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/jamesnetherton/m3u v0.4.0
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/satori/go.uuid v1.2.0
 	github.com/spf13/cobra v1.2.1
 	github.com/spf13/viper v1.8.1
 	github.com/tellytv/go.xtream-codes v0.0.0-20220204001149-59925bc76764
+)
+
+require (
+	github.com/bwmarrin/discordgo v0.29.0
+	github.com/google/uuid v1.1.2
+	github.com/lib/pq v1.10.9
 )
 
 require (
@@ -25,7 +30,9 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.11.2 // indirect
 	github.com/goccy/go-json v0.10.0 // indirect
+	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
+	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/leodido/go-urn v1.2.1 // indirect

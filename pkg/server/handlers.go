@@ -126,19 +126,6 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 	})
 }
 
-func (c *Config) xtreamStream(ctx *gin.Context, oriURL *url.URL) {
-	utils.DebugLog("-> Xtream streaming request: %s", ctx.Request.URL)
-	utils.DebugLog("-> Proxying to Xtream upstream: %s", oriURL.String())
-	
-	id := ctx.Param("id")
-	if strings.HasSuffix(id, ".m3u8") {
-		c.hlsXtreamStream(ctx, oriURL)
-		return
-	}
-
-	c.stream(ctx, oriURL)
-}
-
 type values []string
 
 func (vs values) contains(s string) bool {

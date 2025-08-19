@@ -149,6 +149,17 @@ Set `DEBUG_LOGGING` to `"false"` for production deployments.
 
 ---
 
+## Database Support
+
+PostgreSQL only. SQLite is not supported in this build. Configure via:
+- DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+
+## Discord
+
+Discord webhooks are not supported. Only the Discord bot (DISCORD_BOT_TOKEN) with classic text commands is available.
+
+---
+
 ## Powered By
 
 - [go-ldap/ldap](https://github.com/go-ldap/ldap)

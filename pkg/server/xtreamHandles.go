@@ -266,65 +266,6 @@ func (c *Config) xtreamGet(ctx *gin.Context) {
 	ctx.File(path)
 }
 
-func (c *Config) xtreamApiGet(ctx *gin.Context) {
-	const (
-		apiGet = "apiget"
-	)
-
-	var (
-		extension = ctx.Query("output")
-		cacheName = apiGet + extension
-	)
-
-	xtreamM3uCacheLock.RLock()
-	meta, ok := xtreamM3uCache[cacheName]
-	d := time.Since(meta.Time)
-	if !ok || d.Hours() >= float64(c.M3UCacheExpiration) {
-		log.Printf("[iptv-proxy] %v | %s | xtream cache API m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
-		xtreamM3uCacheLock.RUnlock()
-		playlist, err := c.xtreamGenerateM3u(ctx, extension)
-		if err != nil {
-			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
-			return
-		}
-		if err := c.cacheXtreamM3u(playlist, cacheName); err != nil {
-			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
-			return
-		}
-	} else {
-		xtreamM3uCacheLock.RUnlock()
-	}
-
-	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
-	xtreamM3uCacheLock.RLock()
-	path := xtreamM3uCache[cacheName].string
-	xtreamM3uCacheLock.RUnlock()
-	ctx.Header("Content-Type", "application/octet-stream")
-
-	ctx.File(path)
-
-}
-
-func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) {
-	c.xtreamPlayerAPI(ctx, ctx.Request.URL.Query())
-}
-
-func (c *Config) xtreamPlayerAPIPOST(ctx *gin.Context) {
-	contents, err := ioutil.ReadAll(ctx.Request.Body)
-	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
-		return
-	}
-
-	q, err := url.ParseQuery(string(contents))
-	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
-		return
-	}
-
-	c.xtreamPlayerAPI(ctx, q)
-}
-
 func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 	var action string
 	if len(q["action"]) > 0 {
@@ -418,6 +359,130 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 	}
 
 	ctx.JSON(http.StatusOK, processedResp)
+}
+
+// Prefer multiplexed streaming if enabled via env, otherwise fall back to legacy stream
+func (c *Config) xtreamStream(ctx *gin.Context, oriURL *url.URL) {
+	utils.DebugLog("-> Xtream streaming request: %s", ctx.Request.URL.Path)
+	utils.DebugLog("-> Proxying to Xtream upstream: %s", oriURL.String())
+
+	if c.sessionManager != nil && os.Getenv("FORCE_MULTIPLEXING") == "true" {
+		utils.DebugLog("Using multiplexed streaming (FORCE_MULTIPLEXING=true)")
+		c.multiplexedStream(ctx, oriURL)
+		return
+	}
+
+	// Always use Xtream credentials for upstream requests
+	utils.DebugLog("Xtream backend request using Xtream credentials: user=%s, password=%s, baseURL=%s", 
+		c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL)
+	rawURL := fmt.Sprintf("%s/get.php?username=%s&password=%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword)
+
+	q := ctx.Request.URL.Query()
+
+	for k, v := range q {
+		if k == "username" || k == "password" {
+			continue
+		}
+
+		rawURL = fmt.Sprintf("%s&%s=%s", rawURL, k, strings.Join(v, ","))
+	}
+
+	m3uURL, err := url.Parse(rawURL)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+
+	xtreamM3uCacheLock.RLock()
+	meta, ok := xtreamM3uCache[m3uURL.String()]
+	d := time.Since(meta.Time)
+	if !ok || d.Hours() >= float64(c.M3UCacheExpiration) {
+		log.Printf("[iptv-proxy] %v | %s | xtream cache m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+		xtreamM3uCacheLock.RUnlock()
+		playlist, err := m3u.Parse(m3uURL.String())
+		// --- FIX: Check for empty playlist ---
+		if err != nil {
+			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			return
+		}
+		if len(playlist.Tracks) == 0 {
+			ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty playlist")))
+			return
+		}
+		if err := c.cacheXtreamM3u(&playlist, m3uURL.String()); err != nil {
+			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			return
+		}
+	} else {
+		xtreamM3uCacheLock.RUnlock()
+	}
+
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
+	xtreamM3uCacheLock.RLock()
+	path := xtreamM3uCache[m3uURL.String()].string
+	xtreamM3uCacheLock.RUnlock()
+	ctx.Header("Content-Type", "application/octet-stream")
+
+	ctx.File(path)
+}
+
+func (c *Config) xtreamApiGet(ctx *gin.Context) {
+	const (
+		apiGet = "apiget"
+	)
+
+	var (
+		extension = ctx.Query("output")
+		cacheName = apiGet + extension
+	)
+
+	xtreamM3uCacheLock.RLock()
+	meta, ok := xtreamM3uCache[cacheName]
+	d := time.Since(meta.Time)
+	if !ok || d.Hours() >= float64(c.M3UCacheExpiration) {
+		log.Printf("[iptv-proxy] %v | %s | xtream cache API m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+		xtreamM3uCacheLock.RUnlock()
+		playlist, err := c.xtreamGenerateM3u(ctx, extension)
+		if err != nil {
+			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			return
+		}
+		if err := c.cacheXtreamM3u(playlist, cacheName); err != nil {
+			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			return
+		}
+	} else {
+		xtreamM3uCacheLock.RUnlock()
+	}
+
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
+	xtreamM3uCacheLock.RLock()
+	path := xtreamM3uCache[cacheName].string
+	xtreamM3uCacheLock.RUnlock()
+	ctx.Header("Content-Type", "application/octet-stream")
+
+	ctx.File(path)
+
+}
+
+func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) {
+	c.xtreamPlayerAPI(ctx, ctx.Request.URL.Query())
+}
+
+func (c *Config) xtreamPlayerAPIPOST(ctx *gin.Context) {
+	contents, err := ioutil.ReadAll(ctx.Request.Body)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+
+	q, err := url.ParseQuery(string(contents))
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+
+	c.xtreamPlayerAPI(ctx, q)
 }
 
 // ProcessResponse processes various types of xtream-codes responses
@@ -688,67 +753,54 @@ func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
 // Added to handle direct streaming URLs with proxy credentials instead of Xtream credentials
 func (c *Config) xtreamProxyCredentialsStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
-	utils.DebugLog("Direct stream request with proxy credentials: username=%s, password=%s, id=%s", 
-		ctx.Param("username"), ctx.Param("password"), id)
-	
-	// Always use Xtream credentials for upstream requests
+	utils.DebugLog("Direct stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
+
 	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		utils.ErrorLog("Failed to parse upstream URL: %v", err)
+		ctx.AbortWithStatus(500)
 		return
 	}
-
-	utils.DebugLog("Redirecting to upstream URL with Xtream credentials: %s", rpURL.String())
-	c.xtreamStream(ctx, rpURL)
+	c.multiplexedStream(ctx, rpURL)
 }
 
-// Similar handlers for other stream types using proxy credentials
 func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
-	utils.DebugLog("Direct live stream request with proxy credentials: username=%s, password=%s, id=%s", 
-		ctx.Param("username"), ctx.Param("password"), id)
-	
-	// Always use Xtream credentials for upstream requests
+	utils.DebugLog("Direct live stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
+
 	rpURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		utils.ErrorLog("Failed to parse upstream URL: %v", err)
+		ctx.AbortWithStatus(500)
 		return
 	}
-
-	utils.DebugLog("Redirecting to upstream URL with Xtream credentials: %s", rpURL.String())
-	c.xtreamStream(ctx, rpURL)
+	c.multiplexedStream(ctx, rpURL)
 }
 
 func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
-	utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, password=%s, id=%s", 
-		ctx.Param("username"), ctx.Param("password"), id)
-	
-	// Always use Xtream credentials for upstream requests
+	utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
+
 	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		utils.ErrorLog("Failed to parse upstream URL: %v", err)
+		ctx.AbortWithStatus(500)
 		return
 	}
-
-	utils.DebugLog("Redirecting to upstream URL with Xtream credentials: %s", rpURL.String())
-	c.xtreamStream(ctx, rpURL)
+	c.multiplexedStream(ctx, rpURL)
 }
 
 func (c *Config) xtreamProxyCredentialsSeriesStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
-	utils.DebugLog("Direct series stream request with proxy credentials: username=%s, password=%s, id=%s", 
-		ctx.Param("username"), ctx.Param("password"), id)
-	
-	// Always use Xtream credentials for upstream requests
+	utils.DebugLog("Direct series stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
+
 	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
-		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		utils.ErrorLog("Failed to parse upstream URL: %v", err)
+		ctx.AbortWithStatus(500)
 		return
 	}
-
-	utils.DebugLog("Redirecting to upstream URL with Xtream credentials: %s", rpURL.String())
-	c.xtreamStream(ctx, rpURL)
+	c.multiplexedStream(ctx, rpURL)
 }
 
 func (c *Config) xtreamHlsStream(ctx *gin.Context) {
@@ -769,22 +821,71 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 		return
 	}
 
-	req, err := url.Parse(
-		fmt.Sprintf(
-			"%s://%s/hls/%s/%s",
-			url.Scheme,
-			url.Host,
-			ctx.Param("token"),
-			ctx.Param("chunk"),
-		),
-	)
-
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s://%s/hls/%s/%s", url.Scheme, url.Host, ctx.Param("token"), ctx.Param("chunk")), nil)
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
 		return
 	}
 
-	c.xtreamStream(ctx, req)
+	mergeHttpHeader(req.Header, ctx.Request.Header)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusFound {
+		location, err := resp.Location()
+		if err != nil {
+			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+			return
+		}
+		id := ctx.Param("id")
+		if strings.Contains(location.String(), id) {
+			hlsChannelsRedirectURLLock.Lock()
+			hlsChannelsRedirectURL[id] = *location
+			hlsChannelsRedirectURLLock.Unlock()
+
+			hlsReq, err := http.NewRequest("GET", location.String(), nil)
+			if err != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+				return
+			}
+
+			mergeHttpHeader(hlsReq.Header, ctx.Request.Header)
+
+			hlsResp, err := http.DefaultClient.Do(hlsReq)
+			if err != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+				return
+			}
+			defer hlsResp.Body.Close()
+
+			b, err := ioutil.ReadAll(hlsResp.Body)
+			if err != nil {
+				ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+				return
+			}
+			body := string(b)
+			
+			// Replace upstream Xtream credentials with proxy user credentials in response
+			// This doesn't affect the upstream requests, only what the client sees
+			body = strings.ReplaceAll(body, "/"+c.XtreamUser.String()+"/"+c.XtreamPassword.String()+"/", "/"+c.User.String()+"/"+c.Password.String()+"/")
+
+			utils.DebugLog("HLS stream response modified to use proxy credentials for client URLs")
+			mergeHttpHeader(ctx.Writer.Header(), hlsResp.Header)
+
+			ctx.Data(http.StatusOK, hlsResp.Header.Get("Content-Type"), []byte(body))
+			return
+		}
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(errors.New("Unable to HLS stream"))) // nolint: errcheck
+		return
+	}
+
+	utils.DebugLog("HLS stream response status: %d", resp.StatusCode)
+	ctx.Status(resp.StatusCode)
 }
 
 func (c *Config) xtreamHlsrStream(ctx *gin.Context) {
@@ -901,6 +1002,6 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 		return
 	}
 
-	ctx.Status(resp.StatusCode)
+	utils.DebugLog("HLS stream response status: %d", resp.StatusCode)
 	ctx.Status(resp.StatusCode)
 }
