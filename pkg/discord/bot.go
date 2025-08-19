@@ -69,13 +69,14 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 	// Handle reactions for selection
 	dg.AddHandler(bot.messageReactionAdd)
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		// Polished ready log
 		if s != nil && s.State != nil && s.State.User != nil {
-			utils.InfoLog("Discord ready: logged in as %s#%s (ID: %s), prefix='%s'",
+			utils.InfoLog("✨ Discord ready: %s#%s (%s) | Prefix: %s",
 				s.State.User.Username, s.State.User.Discriminator, s.State.User.ID, bot.prefix)
 		} else {
-			utils.InfoLog("Discord ready: session state not populated yet, prefix='%s'", bot.prefix)
+			utils.InfoLog("✨ Discord ready: session state not populated yet | Prefix: %s", bot.prefix)
 		}
-		utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in the Discord Developer Portal")
+		utils.InfoLog("ℹ️  Ensure 'MESSAGE CONTENT INTENT' is enabled in the Developer Portal.")
 	})
 
 	// Intents: add reactions handling
@@ -94,7 +95,7 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 
 // Start starts the Discord bot
 func (b *Bot) Start() error {
-	utils.InfoLog("Starting Discord bot with intents: Guilds, GuildMessages, DirectMessages, MessageContent")
+	utils.InfoLog("Starting Discord bot with intents: Guilds, GuildMessages, DirectMessages, MessageContent, Reactions")
 	return b.session.Open()
 }
 
@@ -191,18 +192,18 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 // handleLink handles the !link command to link Discord account to LDAP
 func (b *Bot) handleLink(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	if len(args) != 1 {
-		// Changed usage (now expects LDAP username)
-		s.ChannelMessageSend(m.ChannelID, "Usage: !link <ldap_username>") // nolint: errcheck
+		b.info(m.ChannelID, "🔗 Link Your Account",
+			"Usage: `!link <ldap_username>`\n\nThis links your Discord account to your IPTV account.")
 		return
 	}
 
 	ldapUser := strings.TrimSpace(args[0])
 	if ldapUser == "" {
-		s.ChannelMessageSend(m.ChannelID, "Usage: !link <ldap_username>") // nolint: errcheck
+		b.info(m.ChannelID, "🔗 Link Your Account",
+			"Usage: `!link <ldap_username>`\n\nThis links your Discord account to your IPTV account.")
 		return
 	}
 
-	// Send link request to API (token is optional on server side)
 	linkData := map[string]interface{}{
 		"discord_id":   m.Author.ID,
 		"discord_name": m.Author.Username,
@@ -211,15 +212,14 @@ func (b *Bot) handleLink(s *discordgo.Session, m *discordgo.MessageCreate, args 
 
 	success, resp, err := b.makeAPIRequest("POST", "/discord/link", linkData)
 	if err != nil || !success {
-		errMsg := "Failed to link your account"
+		msg := "We couldn't link your account right now."
 		if err != nil {
-			errMsg += ": " + err.Error()
+			msg += fmt.Sprintf("\n\nError: `%s`", err.Error())
 		}
-		s.ChannelMessageSend(m.ChannelID, errMsg) // nolint: errcheck
+		b.fail(m.ChannelID, "❌ Link Failed", msg)
 		return
 	}
 
-	// Extract the LDAP username from response if available
 	var confirmed string
 	if data, ok := resp.(map[string]interface{}); ok {
 		if u, exists := data["ldap_user"]; exists {
@@ -230,105 +230,120 @@ func (b *Bot) handleLink(s *discordgo.Session, m *discordgo.MessageCreate, args 
 		confirmed = ldapUser
 	}
 
-	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Successfully linked your Discord account to user %s", confirmed)) // nolint: errcheck
+	b.success(
+		m.ChannelID,
+		"✅ Linked Successfully",
+		fmt.Sprintf("Your Discord account is now linked to `%s`.\n\nYou're all set to use other commands.", confirmed),
+	)
 }
 
 // handleVOD handles the !vod command to search for VOD content
 func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	// Remove "reply with number" flow; use reactions instead
-
 	query := strings.TrimSpace(strings.Join(args, " "))
 	if query == "" {
-		s.ChannelMessageSend(m.ChannelID, "Usage: !vod <search query>") // nolint: errcheck
+		b.info(m.ChannelID, "🎬 VOD Search",
+			"Usage: `!vod <search query>`\n\nExample: `!vod the matrix`")
 		return
 	}
 
-	// First, get the LDAP username for this Discord user
+	// Resolve LDAP user for this Discord user
 	success, respData, err := b.makeAPIRequest("GET", "/discord/"+m.Author.ID+"/ldap", nil)
 	if err != nil || !success {
-		s.ChannelMessageSend(m.ChannelID, "Your Discord account is not linked to an LDAP user. Please use !link <ldap_username> first.") // nolint: errcheck
+		b.warn(m.ChannelID, "🔗 Linking Required",
+			"Your Discord account is not linked to an IPTV user.\n\nPlease link it first:\n`!link <ldap_username>`")
 		return
 	}
 
-	// Extract LDAP username
 	data, ok := respData.(map[string]interface{})
 	if !ok {
-		s.ChannelMessageSend(m.ChannelID, "Failed to process server response.") // nolint: errcheck
+		b.fail(m.ChannelID, "❌ Unexpected Response",
+			"Failed to process the server response. Please try again later.")
 		return
 	}
 	ldapUser, ok := data["ldap_user"].(string)
 	if !ok || ldapUser == "" {
-		s.ChannelMessageSend(m.ChannelID, "Your Discord account is not linked to an LDAP user. Please use !link <ldap_username> first.") // nolint: errcheck
+		b.warn(m.ChannelID, "🔗 Linking Required",
+			"Your Discord account is not linked to an IPTV user.\n\nPlease link it first:\n`!link <ldap_username>`")
 		return
 	}
 
-	// Send search request to API
+	// Search request
 	searchData := map[string]string{
 		"username": ldapUser,
 		"query":    query,
 	}
 	success, respData, err = b.makeAPIRequest("POST", "/vod/search", searchData)
 	if err != nil || !success {
-		errMsg := "Failed to search for VOD content"
+		msg := "We couldn't complete your search."
 		if err != nil {
-			errMsg += ": " + err.Error()
+			msg += fmt.Sprintf("\n\nError: `%s`", err.Error())
 		}
-		s.ChannelMessageSend(m.ChannelID, errMsg) // nolint: errcheck
+		b.fail(m.ChannelID, "❌ Search Failed", msg)
 		return
 	}
 
-	// Process search results
 	data, ok = respData.(map[string]interface{})
 	if !ok {
-		s.ChannelMessageSend(m.ChannelID, "Failed to process search results.") // nolint: errcheck
+		b.fail(m.ChannelID, "❌ Unexpected Response",
+			"Failed to process the search results. Please try again later.")
 		return
 	}
 
 	resultsData, ok := data["results"].([]interface{})
 	if !ok || len(resultsData) == 0 {
-		s.ChannelMessageSend(m.ChannelID, "No results found for your search.") // nolint: errcheck
+		b.info(m.ChannelID, "🔎 No Results",
+			fmt.Sprintf("No results found for `%s`.\nTry a different title or spelling.", query))
 		return
 	}
 
-	// Convert results and limit to 10 choices
+	// Convert and render up to 10 results
 	var results []types.VODResult
 	for _, result := range resultsData {
 		if len(results) >= 10 {
 			break
 		}
-		resultMap, ok := result.(map[string]interface{})
-		if !ok {
-			continue
+		if resultMap, ok := result.(map[string]interface{}); ok {
+			results = append(results, types.VODResult{
+				ID:       getString(resultMap, "ID"),
+				Title:    getString(resultMap, "Title"),
+				Category: getString(resultMap, "Category"),
+				Duration: getString(resultMap, "Duration"),
+				Year:     getString(resultMap, "Year"),
+				Rating:   getString(resultMap, "Rating"),
+				StreamID: getString(resultMap, "StreamID"),
+			})
 		}
-		results = append(results, types.VODResult{
-			ID:       getString(resultMap, "ID"),
-			Title:    getString(resultMap, "Title"),
-			Category: getString(resultMap, "Category"),
-			Duration: getString(resultMap, "Duration"),
-			Year:     getString(resultMap, "Year"),
-			Rating:   getString(resultMap, "Rating"),
-			StreamID: getString(resultMap, "StreamID"),
-		})
 	}
 
-	// Build display message
-	var sb strings.Builder
-	sb.WriteString("Search results:\n")
-	for i, result := range results {
-		num := i + 1
-		displayNum := fmt.Sprintf("%d", num)
-		if num == 10 {
-			displayNum = "0"
+	// Build a polished results embed
+	var list strings.Builder
+	emojis := []string{"1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "0️⃣"}
+	for i, r := range results {
+		num := emojis[i]
+		list.WriteString(fmt.Sprintf("%s  •  **%s** (%s) — %s", num, r.Title, r.Year, r.Category))
+		if r.Rating != "" {
+			list.WriteString(fmt.Sprintf("  |  ⭐ %s", r.Rating))
 		}
-		sb.WriteString(fmt.Sprintf("%s) %s (%s) - %s | Rating: %s\n",
-			displayNum, result.Title, result.Year, result.Category, result.Rating))
+		list.WriteString("\n")
 	}
-	sb.WriteString("\nAdd a reaction on this message using the corresponding number (0-9).")
 
-	// Send message and add reactions 1-9 and 0 (for 10th)
-	msg, err := s.ChannelMessageSend(m.ChannelID, sb.String())
+	embed := &discordgo.MessageEmbed{
+		Title:       "🎬 VOD Search Results",
+		Description: fmt.Sprintf("Query: `%s`\n\nReact below to pick a number and start the download.", query),
+		Color:       colorInfo,
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "Results",
+				Value:  list.String(),
+				Inline: false,
+			},
+		},
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	msg, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
 	if err != nil {
-		utils.ErrorLog("Discord: failed to send VOD results: %v", err)
+		utils.ErrorLog("Discord: failed to send VOD results embed: %v", err)
 		return
 	}
 
@@ -338,7 +353,6 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
 		choiceMap[i+1] = r
 	}
 
-	// Store pending context keyed by message ID
 	b.pendingMsgLock.Lock()
 	b.pendingVODByMsg[msg.ID] = &vodPendingContext{
 		UserID:    m.Author.ID,
@@ -347,17 +361,13 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
 	}
 	b.pendingMsgLock.Unlock()
 
-	// React with emojis corresponding to available options
-	emojis := []string{"1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "0️⃣"}
 	limit := len(results)
 	if limit > 10 {
 		limit = 10
 	}
 	for i := 0; i < limit; i++ {
-		emoji := emojis[i]
-		// FIX: MessageReactionAdd returns only error
-		if err := s.MessageReactionAdd(msg.ChannelID, msg.ID, emoji); err != nil {
-			utils.WarnLog("Discord: failed to add reaction %s: %v", emoji, err)
+		if err := s.MessageReactionAdd(msg.ChannelID, msg.ID, emojis[i]); err != nil {
+			utils.WarnLog("Discord: failed to add reaction %s: %v", emojis[i], err)
 		}
 	}
 }
@@ -413,18 +423,18 @@ func (b *Bot) startVODDownloadFromSelection(s *discordgo.Session, channelID, use
 	// Get LDAP username for this Discord user
 	success, respData, err := b.makeAPIRequest("GET", "/discord/"+userID+"/ldap", nil)
 	if err != nil || !success {
-		s.ChannelMessageSend(channelID, "Failed to retrieve your user information. Please try again later.") // nolint: errcheck
+		b.fail(channelID, "❌ Download Failed", "Failed to retrieve your user information. Please try again later.")
 		return
 	}
 
 	data, ok := respData.(map[string]interface{})
 	if !ok {
-		s.ChannelMessageSend(channelID, "Failed to process server response.") // nolint: errcheck
+		b.fail(channelID, "❌ Download Failed", "Failed to process server response.")
 		return
 	}
 	ldapUser, ok := data["ldap_user"].(string)
 	if !ok || ldapUser == "" {
-		s.ChannelMessageSend(channelID, "Your Discord account is not linked to an LDAP user. Please use !link <ldap_username> first.") // nolint: errcheck
+		b.warn(channelID, "🔗 Linking Required", "Your Discord account is not linked to an IPTV user.\n\nPlease link it first:\n`!link <ldap_username>`")
 		return
 	}
 
@@ -446,32 +456,41 @@ func (b *Bot) startVODDownloadFromSelection(s *discordgo.Session, channelID, use
 				}
 			}
 		}
-		s.ChannelMessageSend(channelID, errMsg) // nolint: errcheck
+		b.fail(channelID, "❌ Download Failed", errMsg)
 		return
 	}
 
 	// Process download response
 	data, ok = respData.(map[string]interface{})
 	if !ok {
-		s.ChannelMessageSend(channelID, "Failed to process download response.") // nolint: errcheck
+		b.fail(channelID, "❌ Download Failed", "Failed to process download response.")
 		return
 	}
 	downloadURL, ok := data["download_url"].(string)
 	if !ok || downloadURL == "" {
-		s.ChannelMessageSend(channelID, "Failed to get download URL.") // nolint: errcheck
+		b.fail(channelID, "❌ Download Failed", "Failed to get download URL.")
 		return
 	}
 
 	// Format expiration time if available
 	var expirationInfo string
-	if expiry, ok := data["expires_at"].(string); ok {
-		expirationInfo = fmt.Sprintf("\n\nThis link will expire after %s", expiry)
+	if expiry, ok := data["expires_at"].(string); ok && strings.TrimSpace(expiry) != "" {
+		expirationInfo = fmt.Sprintf("\nThis link will expire after %s", expiry)
 	}
 
-	// Send download link to user
-	s.ChannelMessageSend(channelID, fmt.Sprintf(
-		"Your download for %s is ready!\n\nDownload link: %s%s",
-		selectedVOD.Title, downloadURL, expirationInfo)) // nolint: errcheck
+	// Send polished success embed
+	desc := fmt.Sprintf("**%s**\n\nYour download is ready.", selectedVOD.Title)
+	if expirationInfo != "" {
+		desc += "\n" + expirationInfo
+	}
+	fields := []*discordgo.MessageEmbedField{
+		{
+			Name:   "Download Link",
+			Value:  fmt.Sprintf("[Click here to download](%s)", downloadURL),
+			Inline: false,
+		},
+	}
+	b.success(channelID, "✅ Download Ready", desc, fields...)
 }
 
 // handleStatus shows the current streams and users
@@ -483,13 +502,13 @@ func (b *Bot) handleStatus(s *discordgo.Session, m *discordgo.MessageCreate, _ [
 		if err != nil {
 			msg += ": " + err.Error()
 		}
-		_, _ = s.ChannelMessageSend(m.ChannelID, msg)
+		b.fail(m.ChannelID, "❌ Status Failed", msg)
 		return
 	}
 
 	data, ok := respData.(map[string]interface{})
 	if !ok {
-		_, _ = s.ChannelMessageSend(m.ChannelID, "Unexpected status payload from server")
+		b.fail(m.ChannelID, "❌ Unexpected Response", "Failed to process status from server.")
 		return
 	}
 
@@ -518,110 +537,145 @@ func (b *Bot) handleStatus(s *discordgo.Session, m *discordgo.MessageCreate, _ [
 	activeUsersCount := intValue("users_count_active")
 	text := strings.TrimSpace(strValue("text"))
 
-	if text == "" {
-		// Fallback to a minimal line if text summary missing
-		text = "No active streams."
-		if streamsCount > 0 {
-			text = "Active streams present; details unavailable."
-		}
+	desc := fmt.Sprintf("Active Streams: **%d**\nActive Users: **%d**", streamsCount, activeUsersCount)
+	if text != "" {
+		desc += fmt.Sprintf("\n\n%s", text)
+	} else if streamsCount == 0 {
+		desc += "\n\nNo active streams."
 	}
 
-	msg := fmt.Sprintf("IPTV Proxy Status\n\nActive Streams: %d\n\nActive Users: %d\n\n%s",
-		streamsCount, activeUsersCount, text)
-
-	_, _ = s.ChannelMessageSend(m.ChannelID, msg)
+	b.info(m.ChannelID, "📊 IPTV Proxy Status", desc)
 }
 
 // handleDisconnect forcibly disconnects a user
 func (b *Bot) handleDisconnect(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	// Check if user has admin permissions
 	if !b.hasAdminRole(s, m.GuildID, m.Author.ID) {
-		s.ChannelMessageSend(m.ChannelID, "You don't have permission to use this command.")
+		b.fail(m.ChannelID, "❌ Permission Denied", "You don't have permission to use this command.")
 		return
 	}
 
 	if len(args) != 1 {
-		s.ChannelMessageSend(m.ChannelID, "Usage: !disconnect <username>")
+		b.info(m.ChannelID, "🔌 Disconnect User", "Usage: `!disconnect <username>`")
 		return
 	}
 
 	username := args[0]
-
-	// Send disconnect request to API
 	success, _, err := b.makeAPIRequest("POST", "/users/disconnect/"+username, nil)
 	if err != nil || !success {
-		errMsg := "Failed to disconnect user"
+		msg := "We couldn't disconnect this user."
 		if err != nil {
-			errMsg += ": " + err.Error()
+			msg += fmt.Sprintf("\n\nError: `%s`", err.Error())
 		}
-		s.ChannelMessageSend(m.ChannelID, errMsg)
+		b.fail(m.ChannelID, "❌ Disconnect Failed", msg)
 		return
 	}
 
-	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("User **%s** has been disconnected.", username))
+	b.success(m.ChannelID, "✅ User Disconnected",
+		fmt.Sprintf("User **%s** has been disconnected.", username))
 }
 
 // handleTimeout temporarily blocks a user
 func (b *Bot) handleTimeout(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	// Check if user has admin permissions
 	if !b.hasAdminRole(s, m.GuildID, m.Author.ID) {
-		s.ChannelMessageSend(m.ChannelID, "You don't have permission to use this command.")
+		b.fail(m.ChannelID, "❌ Permission Denied", "You don't have permission to use this command.")
 		return
 	}
 
 	if len(args) != 2 {
-		s.ChannelMessageSend(m.ChannelID, "Usage: !timeout <username> <minutes>")
+		b.info(m.ChannelID, "⏳ Timeout User", "Usage: `!timeout <username> <minutes>`")
 		return
 	}
 
 	username := args[0]
 	minutes := 0
 	fmt.Sscanf(args[1], "%d", &minutes)
-
 	if minutes <= 0 {
-		s.ChannelMessageSend(m.ChannelID, "Timeout minutes must be a positive number.")
+		b.warn(m.ChannelID, "⏳ Invalid Timeout",
+			"Timeout minutes must be a positive number.")
 		return
 	}
 
-	// Send timeout request to API
-	timeoutData := map[string]int{
-		"minutes": minutes,
-	}
-
+	timeoutData := map[string]int{"minutes": minutes}
 	success, _, err := b.makeAPIRequest("POST", "/users/timeout/"+username, timeoutData)
 	if err != nil || !success {
-		errMsg := "Failed to timeout user"
+		msg := "We couldn't set a timeout for this user."
 		if err != nil {
-			errMsg += ": " + err.Error()
+			msg += fmt.Sprintf("\n\nError: `%s`", err.Error())
 		}
-		s.ChannelMessageSend(m.ChannelID, errMsg)
+		b.fail(m.ChannelID, "❌ Timeout Failed", msg)
 		return
 	}
 
-	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("User **%s** has been timed out for %d minutes.", username, minutes))
+	b.success(m.ChannelID, "✅ Timeout Applied",
+		fmt.Sprintf("User **%s** has been timed out for **%d** minutes.", username, minutes))
 }
 
 // handleHelp shows the help message
 func (b *Bot) handleHelp(s *discordgo.Session, m *discordgo.MessageCreate) {
-	var sb strings.Builder
-	sb.WriteString("**IPTV Proxy Bot Commands**\n\n")
+	var cmd strings.Builder
+	cmd.WriteString("**User Commands**\n")
+	cmd.WriteString("• `!link <ldap_username>` — Link your Discord account.\n")
+	cmd.WriteString("• `!vod <query>` — Search VOD; react 0–9 to choose.\n")
+	cmd.WriteString("• `!status` — Show active streams and users.\n")
+	cmd.WriteString("• `!help` — Show this help.\n\n")
 
-	// Regular user commands
-	sb.WriteString("**User Commands:**\n")
-	sb.WriteString("`!link <ldap_username>` - Link your Discord account to your IPTV account\n")
-	sb.WriteString("`!vod <search query>` - Search for VOD; react 0-9 on the results message to choose\n")
-	sb.WriteString("`!help` - Show this help message\n\n")
-
-	// Admin commands if user has admin role
 	if b.hasAdminRole(s, m.GuildID, m.Author.ID) {
-		sb.WriteString("**Admin Commands:**\n")
-		sb.WriteString("`!status` - Show active streams and users\n")
-		sb.WriteString("`!disconnect <username>` - Forcibly disconnect a user\n")
-		sb.WriteString("`!timeout <username> <minutes>` - Temporarily block a user\n")
+		cmd.WriteString("**Admin Commands**\n")
+		// status is available to all users now; do not list it here
+		cmd.WriteString("• `!disconnect <username>` — Forcibly disconnect a user.\n")
+		cmd.WriteString("• `!timeout <username> <minutes>` — Temporarily block a user.\n")
 	}
 
-	if _, err := s.ChannelMessageSend(m.ChannelID, sb.String()); err != nil {
-		utils.ErrorLog("Discord: failed to send help message: %v", err)
+	b.info(m.ChannelID, "🤖 IPTV Proxy Bot — Help", cmd.String())
+}
+
+// Embed styles and helpers
+const (
+	colorInfo    = 0x5BC0DE // teal-ish
+	colorSuccess = 0x28A745 // green
+	colorWarn    = 0xFFC107 // amber
+	colorError   = 0xDC3545 // red
+)
+
+func (b *Bot) sendEmbed(channelID string, color int, title, description string, fields ...*discordgo.MessageEmbedField) error {
+	embed := &discordgo.MessageEmbed{
+		Title:       title,
+		Description: description,
+		Color:       color,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(fields) > 0 {
+		embed.Fields = make([]*discordgo.MessageEmbedField, 0, len(fields))
+		for _, f := range fields {
+			if f != nil {
+				embed.Fields = append(embed.Fields, f)
+			}
+		}
+	}
+	_, err := b.session.ChannelMessageSendEmbed(channelID, embed)
+	return err
+}
+
+func (b *Bot) info(channelID, title, desc string, fields ...*discordgo.MessageEmbedField) {
+	if err := b.sendEmbed(channelID, colorInfo, title, desc, fields...); err != nil {
+		utils.ErrorLog("Discord: failed to send info embed: %v", err)
+	}
+}
+func (b *Bot) success(channelID, title, desc string, fields ...*discordgo.MessageEmbedField) {
+	if err := b.sendEmbed(channelID, colorSuccess, title, desc, fields...); err != nil {
+		utils.ErrorLog("Discord: failed to send success embed: %v", err)
+	}
+}
+func (b *Bot) warn(channelID, title, desc string, fields ...*discordgo.MessageEmbedField) {
+	if err := b.sendEmbed(channelID, colorWarn, title, desc, fields...); err != nil {
+		utils.ErrorLog("Discord: failed to send warning embed: %v", err)
+	}
+}
+func (b *Bot) fail(channelID, title, desc string, fields ...*discordgo.MessageEmbedField) {
+	if err := b.sendEmbed(channelID, colorError, title, desc, fields...); err != nil {
+		utils.ErrorLog("Discord: failed to send error embed: %v", err)
 	}
 }
 
