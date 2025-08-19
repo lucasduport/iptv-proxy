@@ -475,122 +475,61 @@ func (b *Bot) startVODDownloadFromSelection(s *discordgo.Session, channelID, use
 }
 
 // handleStatus shows the current streams and users
-func (b *Bot) handleStatus(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	// Check if user has admin permissions
-	if !b.hasAdminRole(s, m.GuildID, m.Author.ID) {
-		s.ChannelMessageSend(m.ChannelID, "You don't have permission to use this command.")
-		return
-	}
-
-	// Get all active streams
-	success, respData, err := b.makeAPIRequest("GET", "/streams", nil)
+func (b *Bot) handleStatus(s *discordgo.Session, m *discordgo.MessageCreate, _ []string) {
+	// Call the consolidated status endpoint
+	success, respData, err := b.makeAPIRequest("GET", "/status", nil)
 	if err != nil || !success {
-		errMsg := "Failed to get stream status"
+		msg := "Failed to get status"
 		if err != nil {
-			errMsg += ": " + err.Error()
+			msg += ": " + err.Error()
 		}
-		s.ChannelMessageSend(m.ChannelID, errMsg)
+		_, _ = s.ChannelMessageSend(m.ChannelID, msg)
 		return
 	}
 
-	// Parse streams data
-	var streams []interface{}
-	if data, ok := respData.(map[string]interface{}); ok {
-		if streamsData, ok := data["data"].([]interface{}); ok {
-			streams = streamsData
-		}
-	}
-
-	// Get all active users
-	success, respData, err = b.makeAPIRequest("GET", "/users", nil)
-	if err != nil || !success {
-		errMsg := "Failed to get user status"
-		if err != nil {
-			errMsg += ": " + err.Error()
-		}
-		s.ChannelMessageSend(m.ChannelID, errMsg)
+	data, ok := respData.(map[string]interface{})
+	if !ok {
+		_, _ = s.ChannelMessageSend(m.ChannelID, "Unexpected status payload from server")
 		return
 	}
 
-	// Parse users data
-	var users []interface{}
-	if data, ok := respData.(map[string]interface{}); ok {
-		if usersData, ok := data["data"].([]interface{}); ok {
-			users = usersData
-		}
-	}
-
-	// Format status message
-	var sb strings.Builder
-	sb.WriteString("**IPTV Proxy Status**\n\n")
-
-	// Format streams info
-	sb.WriteString(fmt.Sprintf("**Active Streams:** %d\n\n", len(streams)))
-	for i, stream := range streams {
-		streamMap, ok := stream.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		streamID := getString(streamMap, "StreamID")
-		streamTitle := getString(streamMap, "StreamTitle")
-		streamType := getString(streamMap, "StreamType")
-
-		// Format viewers
-		var viewerCount int
-		var viewersList string
-		if viewers, ok := streamMap["Viewers"].(map[string]interface{}); ok {
-			viewerCount = len(viewers)
-			if viewerCount > 0 {
-				var viewerNames []string
-				for viewer := range viewers {
-					viewerNames = append(viewerNames, viewer)
-				}
-				viewersList = strings.Join(viewerNames, ", ")
+	// Helpers for safe extraction
+	intValue := func(key string) int {
+		if v, ok := data[key]; ok {
+			switch t := v.(type) {
+			case float64:
+				return int(t)
+			case int:
+				return t
 			}
 		}
-
-		sb.WriteString(fmt.Sprintf("%d. **%s** (%s type: %s)\n", i+1, streamTitle, streamType, streamID))
-		sb.WriteString(fmt.Sprintf("   Viewers (%d): %s\n\n", viewerCount, viewersList))
+		return 0
 	}
-
-	// Format users info
-	sb.WriteString(fmt.Sprintf("\n**Active Users:** %d\n\n", len(users)))
-	for i, user := range users {
-		userMap, ok := user.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		username := getString(userMap, "Username")
-		streamID := getString(userMap, "StreamID")
-
-		var streamInfo string
-		if streamID != "" {
-			streamInfo = fmt.Sprintf(" - Watching: %s", streamID)
-		} else {
-			streamInfo = " - Not streaming"
-		}
-
-		sb.WriteString(fmt.Sprintf("%d. **%s**%s\n", i+1, username, streamInfo))
-	}
-
-	// Send status message, splitting if needed
-	statusMessage := sb.String()
-
-	// Discord has a message length limit of 2000 chars
-	if len(statusMessage) > 1900 {
-		// Split into multiple messages
-		for i := 0; i < len(statusMessage); i += 1900 {
-			end := i + 1900
-			if end > len(statusMessage) {
-				end = len(statusMessage)
+	strValue := func(key string) string {
+		if v, ok := data[key]; ok {
+			if s, ok := v.(string); ok {
+				return s
 			}
-			s.ChannelMessageSend(m.ChannelID, statusMessage[i:end])
 		}
-	} else {
-		s.ChannelMessageSend(m.ChannelID, statusMessage)
+		return ""
 	}
+
+	streamsCount := intValue("streams_count")
+	activeUsersCount := intValue("users_count_active")
+	text := strings.TrimSpace(strValue("text"))
+
+	if text == "" {
+		// Fallback to a minimal line if text summary missing
+		text = "No active streams."
+		if streamsCount > 0 {
+			text = "Active streams present; details unavailable."
+		}
+	}
+
+	msg := fmt.Sprintf("IPTV Proxy Status\n\nActive Streams: %d\n\nActive Users: %d\n\n%s",
+		streamsCount, activeUsersCount, text)
+
+	_, _ = s.ChannelMessageSend(m.ChannelID, msg)
 }
 
 // handleDisconnect forcibly disconnects a user

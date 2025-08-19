@@ -23,6 +23,107 @@ import (
 // internalAPIKey is used to secure the internal API
 var internalAPIKey string
 
+// --- BEGIN: Channel name index (streamID -> channel title) ---
+
+var (
+	channelIndexMu   sync.RWMutex
+	channelIndex     map[string]string
+	channelIndexPath string
+	channelIndexMTime time.Time
+)
+
+// normalizeStreamID trims common file extensions from the last path segment
+func normalizeStreamID(id string) string {
+	if i := strings.Index(id, "."); i > 0 {
+		return id[:i]
+	}
+	return id
+}
+
+// ensureChannelIndex parses c.proxyfiedM3UPath and builds/refreshes the channelIndex cache
+func (c *Config) ensureChannelIndex() {
+	m3uPath := c.proxyfiedM3UPath
+	if strings.TrimSpace(m3uPath) == "" {
+		return
+	}
+	info, err := os.Stat(m3uPath)
+	if err != nil {
+		return
+	}
+
+	// Fast path: unchanged
+	channelIndexMu.RLock()
+	same := channelIndex != nil && channelIndexPath == m3uPath && channelIndexMTime.Equal(info.ModTime())
+	channelIndexMu.RUnlock()
+	if same {
+		return
+	}
+
+	// Rebuild under write lock (double-check inside)
+	channelIndexMu.Lock()
+	defer channelIndexMu.Unlock()
+
+	if channelIndex != nil && channelIndexPath == m3uPath && channelIndexMTime.Equal(info.ModTime()) {
+		return
+	}
+
+	f, err := os.Open(m3uPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	lastTitle := ""
+	newIndex := make(map[string]string, 4096)
+
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#EXTINF:") {
+			// Title after last comma
+			if idx := strings.LastIndex(line, ","); idx != -1 && idx+1 < len(line) {
+				lastTitle = strings.TrimSpace(line[idx+1:])
+			} else {
+				lastTitle = ""
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+			u, err := url.Parse(line)
+			if err == nil {
+				base := path.Base(u.Path)
+				id := normalizeStreamID(base)
+				if lastTitle != "" {
+					newIndex[id] = lastTitle
+				}
+			}
+			lastTitle = ""
+		}
+	}
+	// Ignore sc.Err(); best-effort index
+
+	channelIndex = newIndex
+	channelIndexPath = m3uPath
+	channelIndexMTime = info.ModTime()
+}
+
+// getChannelNameByID returns the channel name for a given stream ID if known
+func (c *Config) getChannelNameByID(streamID string) (string, bool) {
+	c.ensureChannelIndex()
+	channelIndexMu.RLock()
+	defer channelIndexMu.RUnlock()
+	if channelIndex == nil {
+		return "", false
+	}
+	name, ok := channelIndex[normalizeStreamID(streamID)]
+	return name, ok
+}
+
+// --- END: Channel name index ---
+
 func init() {
 	// Generate a random API key at startup or use from environment
 	envKey := os.Getenv("INTERNAL_API_KEY")
@@ -90,6 +191,9 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 	api.POST("/vod/search", c.searchVOD)
 	api.POST("/vod/download", c.createVODDownload)
 	api.GET("/vod/status/:requestid", c.getVODRequestStatus)
+
+	// Status summary for Discord and dashboards
+	api.GET("/status", c.statusSummary)
 
 	// Debug endpoint to verify API is working
 	api.GET("/ping", func(ctx *gin.Context) {
@@ -744,4 +848,102 @@ func maskURL(urlStr string) string {
 		parts[4] = maskString(parts[4]) // Username
 	}
 	return strings.Join(parts, "/")
+}
+
+// statusSummary returns a compact summary of who is watching what
+func (c *Config) statusSummary(ctx *gin.Context) {
+	if c.sessionManager == nil {
+		utils.ErrorLog("Session manager is nil in statusSummary")
+		ctx.JSON(http.StatusInternalServerError, types.APIResponse{
+			Success: false,
+			Error:   "Session manager not initialized",
+		})
+		return
+	}
+
+	streams := c.sessionManager.GetAllStreams()
+	// Remove Discord username enrichment; only LDAP (username)
+	type item struct {
+		StreamID    string    `json:"stream_id"`
+		StreamType  string    `json:"stream_type"`
+		StreamTitle string    `json:"stream_title"`
+		ViewerCount int       `json:"viewer_count"`
+		Viewers     []string  `json:"viewers"`
+		StartedAt   time.Time `json:"started_at"`
+		Duration    string    `json:"duration"`
+	}
+	summary := make([]item, 0, len(streams))
+
+	for _, s := range streams {
+		if !s.Active {
+			continue
+		}
+		viewers := s.GetViewers()
+		names := make([]string, 0, len(viewers))
+		for u := range viewers {
+			names = append(names, u) // LDAP username
+		}
+		dur := time.Since(s.StartTime).Truncate(time.Second)
+
+		// Prefer channel name from M3U mapping if StreamTitle is empty or equals the ID
+		title := strings.TrimSpace(s.StreamTitle)
+		if title == "" || title == s.StreamID {
+			if name, ok := c.getChannelNameByID(s.StreamID); ok && strings.TrimSpace(name) != "" {
+				title = name
+			}
+		}
+
+		summary = append(summary, item{
+			StreamID:    s.StreamID,
+			StreamType:  s.StreamType,
+			StreamTitle: title,
+			ViewerCount: len(names),
+			Viewers:     names,
+			StartedAt:   s.StartTime,
+			Duration:    dur.String(),
+		})
+	}
+
+	// Derive user and stream counts for the bot
+	allSessions := c.sessionManager.GetAllSessions()
+	activeUserSet := make(map[string]struct{}, len(allSessions))
+	for _, us := range allSessions {
+		if us.StreamID != "" {
+			activeUserSet[us.Username] = struct{}{}
+		}
+	}
+	activeUsers := make([]string, 0, len(activeUserSet))
+	for u := range activeUserSet {
+		activeUsers = append(activeUsers, u)
+	}
+
+	// Build a human-friendly text summary for Discord (LDAP only)
+	var b strings.Builder
+	if len(summary) == 0 {
+		b.WriteString("No active streams.")
+	} else {
+		b.WriteString("Active streams:\n")
+		for _, it := range summary {
+			title := it.StreamTitle
+			if strings.TrimSpace(title) == "" {
+				title = it.StreamID
+			}
+			b.WriteString(fmt.Sprintf(
+				"- %s [%s] — %d viewer(s): %s (since %s)\n",
+				title, it.StreamType, it.ViewerCount, strings.Join(it.Viewers, ", "), it.Duration,
+			))
+		}
+	}
+
+	ctx.JSON(http.StatusOK, types.APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"summary":            summary,
+			"text":               b.String(),
+			"streams_count":      len(summary),
+			"users_count_total":  len(allSessions),
+			"users_count_active": len(activeUserSet),
+			"active_users":       activeUsers,
+		},
+	})
 }
