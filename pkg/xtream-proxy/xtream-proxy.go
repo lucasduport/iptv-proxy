@@ -1,6 +1,6 @@
 /*
- * Iptv-Proxy is a project to proxyfie an m3u file and to proxyfie an Xtream iptv service (client API).
- * Copyright (C) 2020  Pierre-Emmanuel Jacquier
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -31,8 +31,8 @@ import (
     "time"
     "unicode/utf8"
 
-    "github.com/lucasduport/iptv-proxy/pkg/config"
-    "github.com/lucasduport/iptv-proxy/pkg/utils"
+    "github.com/lucasduport/stream-share/pkg/config"
+    "github.com/lucasduport/stream-share/pkg/utils"
 )
 
 // API endpoint constants
@@ -134,7 +134,7 @@ func (c *Client) Action(cfg *config.ProxyConfig, action string, q url.Values) (r
             lastErr = err
             continue
         }
-        req.Header.Set("User-Agent", "IPTV-Proxy")
+        req.Header.Set("User-Agent", "stream-share")
         req.Header.Set("Accept", "application/json, text/plain, */*")
 
         resp, err = client.Do(req)

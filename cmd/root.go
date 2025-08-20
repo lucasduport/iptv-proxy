@@ -1,6 +1,6 @@
 /*
- * Iptv-Proxy is a project to proxyfie an m3u file and to proxyfie an Xtream iptv service (client API).
- * Copyright (C) 2020  Pierre-Emmanuel Jacquier
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,8 +26,8 @@ import (
 	"strings"
 
 	homedir "github.com/mitchellh/go-homedir"
-	"github.com/lucasduport/iptv-proxy/pkg/config"
-	"github.com/lucasduport/iptv-proxy/pkg/server"
+	"github.com/lucasduport/stream-share/pkg/config"
+	"github.com/lucasduport/stream-share/pkg/server"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -36,7 +36,7 @@ var cfgFile string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "iptv-proxy",
+	Use:   "stream-share",
 	Short: "Proxy for IPTV streams with LDAP authentication",
 	Long: `IPTV Proxy is a service that proxies IPTV streams and M3U playlists
 with LDAP authentication support for secure access control.
@@ -48,7 +48,7 @@ It supports:
 - Caching for performance optimization`,
 
 	Run: func(cmd *cobra.Command, args []string) {
-		log.Printf("[iptv-proxy] Server is starting...")
+		log.Printf("[stream-share] Server is starting...")
 
 		// Parse M3U URL if provided
 		m3uURL := viper.GetString("m3u-url")
@@ -72,11 +72,11 @@ It supports:
 		// Auto-detect Xtream service if credentials are present in the M3U URL
 		if xtreamBaseURL == "" && xtreamPassword == "" && xtreamUser == "" {
 			if username != "" && password != "" {
-				log.Printf("[iptv-proxy] INFO: It appears you are using an Xtream provider")
+				log.Printf("[stream-share] INFO: It appears you are using an Xtream provider")
 				xtreamUser = username
 				xtreamPassword = password
 				xtreamBaseURL = fmt.Sprintf("%s://%s", remoteHostURL.Scheme, remoteHostURL.Host)
-				log.Printf("[iptv-proxy] INFO: Xtream service enabled with base URL: %q, username: %q, password: %q",
+				log.Printf("[stream-share] INFO: Xtream service enabled with base URL: %q, username: %q, password: %q",
 					xtreamBaseURL, xtreamUser, xtreamPassword)
 			}
 		}
@@ -147,7 +147,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	// Config file flag
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "Config file (default is $HOME/.iptv-proxy.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "Config file (default is $HOME/.stream-share.yaml)")
 
 	// Basic configuration flags
 	rootCmd.Flags().StringP("m3u-url", "u", "", "M3U file URL or local path")
@@ -202,7 +202,7 @@ func initConfig() {
 		// Search config in home directory and current directory
 		viper.AddConfigPath(home)
 		viper.AddConfigPath(".")
-		viper.SetConfigName(".iptv-proxy")
+		viper.SetConfigName(".stream-share")
 	}
 
 	// Replace hyphens with underscores in environment variables

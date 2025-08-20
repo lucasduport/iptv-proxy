@@ -1,4 +1,22 @@
-package server
+/*
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+ 
+ package server
 
 import (
 	"bufio"
@@ -13,8 +31,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lucasduport/iptv-proxy/pkg/types"
-	"github.com/lucasduport/iptv-proxy/pkg/utils"
+	"github.com/lucasduport/stream-share/pkg/types"
+	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
 var vodM3UMu sync.Mutex
@@ -52,7 +70,7 @@ func (c *Config) ensureVODM3UCache() (string, error) {
 	// Cache directory preference: CACHE_FOLDER env or temp dir
 	cacheDir := os.Getenv("CACHE_FOLDER")
 	if cacheDir == "" {
-		cacheDir = filepath.Join(os.TempDir(), ".iptv-proxy")
+		cacheDir = filepath.Join(os.TempDir(), ".stream-share")
 	}
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", err
@@ -81,7 +99,7 @@ func (c *Config) ensureVODM3UCache() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "iptv-proxy/1.0")
+	req.Header.Set("User-Agent", "stream-share/1.0")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -1,6 +1,6 @@
 /*
- * Iptv-Proxy is a project to proxyfie an m3u file and to proxyfie an Xtream iptv service (client API).
- * Copyright (C) 2020  Pierre-Emmanuel Jacquier
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,7 +27,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/lucasduport/iptv-proxy/pkg/utils"
+	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
 func (c *Config) routes(r *gin.RouterGroup) {
@@ -127,5 +127,5 @@ func (c *Config) InitializeRoutes(r *gin.Engine) {
 		c.stream(ctx, rpURL)
 	})
 
-	log.Printf("[iptv-proxy] Routes initialized with direct stream URL support")
+	log.Printf("[stream-share] Routes initialized with direct stream URL support")
 }

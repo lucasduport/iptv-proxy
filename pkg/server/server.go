@@ -1,6 +1,6 @@
 /*
- * Iptv-Proxy is a project to proxyfie an m3u file and to proxyfie an Xtream iptv service (client API).
- * Copyright (C) 2020  Pierre-Emmanuel Jacquier
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -34,17 +34,17 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/jamesnetherton/m3u"
-	"github.com/lucasduport/iptv-proxy/pkg/config"
-	"github.com/lucasduport/iptv-proxy/pkg/database"
-	"github.com/lucasduport/iptv-proxy/pkg/discord"
-	"github.com/lucasduport/iptv-proxy/pkg/session"
-	"github.com/lucasduport/iptv-proxy/pkg/utils"
+	"github.com/lucasduport/stream-share/pkg/config"
+	"github.com/lucasduport/stream-share/pkg/database"
+	"github.com/lucasduport/stream-share/pkg/discord"
+	"github.com/lucasduport/stream-share/pkg/session"
+	"github.com/lucasduport/stream-share/pkg/utils"
 	uuid "github.com/satori/go.uuid"
 
 	"github.com/gin-gonic/gin"
 )
 
-var defaultProxyfiedM3UPath = filepath.Join(os.TempDir(), uuid.NewV4().String()+".iptv-proxy.m3u")
+var defaultProxyfiedM3UPath = filepath.Join(os.TempDir(), uuid.NewV4().String()+".stream-share.m3u")
 var endpointAntiColision = strings.Split(uuid.NewV4().String(), "-")[0]
 
 // Config represent the server configuration
@@ -188,9 +188,9 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	return serverConfig, nil
 }
 
-// Serve the iptv-proxy api
+// Serve the stream-share api
 func (c *Config) Serve() error {
-	utils.InfoLog("[iptv-proxy] Server is starting...")
+	utils.InfoLog("[stream-share] Server is starting...")
 
 	if c.db != nil && c.db.IsInitialized() {
 		utils.InfoLog("Bootstrap: Database is initialized and connected")
@@ -240,13 +240,13 @@ func (c *Config) Serve() error {
 	router.GET("/download/:token", c.handleTemporaryLink)
 
 	// Add a message to indicate the server is ready
-	utils.InfoLog("[iptv-proxy] Server is ready and listening on :%d", c.HostConfig.Port)
+	utils.InfoLog("[stream-share] Server is ready and listening on :%d", c.HostConfig.Port)
 	return router.Run(fmt.Sprintf(":%d", c.HostConfig.Port))
 }
 
 // Add direct streaming routes with proxy credentials
 func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
-	utils.InfoLog("[iptv-proxy] Setting up direct stream routes with proxy credentials")
+	utils.InfoLog("[stream-share] Setting up direct stream routes with proxy credentials")
 
 	// Root level (generic)
 	router.GET("/:username/:password/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
@@ -315,7 +315,7 @@ func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
 		c.multiplexedStream(ctx, rpURL)
 	})
 
-	utils.InfoLog("[iptv-proxy] Routes initialized with direct stream URL support")
+	utils.InfoLog("[stream-share] Routes initialized with direct stream URL support")
 }
 
 // Authentication middleware that checks credentials from URL path parameters

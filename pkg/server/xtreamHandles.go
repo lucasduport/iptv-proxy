@@ -1,6 +1,6 @@
 /*
- * Iptv-Proxy is a project to proxyfie an m3u file and to proxyfie an Xtream iptv service (client API).
- * Copyright (C) 2020  Pierre-Emmanuel Jacquier
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,9 +37,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jamesnetherton/m3u"
-	"github.com/lucasduport/iptv-proxy/pkg/config"
-	"github.com/lucasduport/iptv-proxy/pkg/utils"
-	xtreamapi "github.com/lucasduport/iptv-proxy/pkg/xtream-proxy"
+	"github.com/lucasduport/stream-share/pkg/config"
+	"github.com/lucasduport/stream-share/pkg/utils"
+	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream-proxy"
 	uuid "github.com/satori/go.uuid"
 )
 
@@ -63,7 +63,7 @@ func (c *Config) cacheXtreamM3u(playlist *m3u.Playlist, cacheName string) error 
 	tmp := *c
 	tmp.playlist = playlist
 
-	path := filepath.Join(os.TempDir(), uuid.NewV4().String()+".iptv-proxy.m3u")
+	path := filepath.Join(os.TempDir(), uuid.NewV4().String()+".stream-share.m3u")
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -237,7 +237,7 @@ func (c *Config) xtreamGet(ctx *gin.Context) {
 	meta, ok := xtreamM3uCache[m3uURL.String()]
 	d := time.Since(meta.Time)
 	if !ok || d.Hours() >= float64(c.M3UCacheExpiration) {
-		log.Printf("[iptv-proxy] %v | %s | xtream cache m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+		log.Printf("[stream-share] %v | %s | xtream cache m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
 		xtreamM3uCacheLock.RUnlock()
 		playlist, err := m3u.Parse(m3uURL.String())
 		// --- FIX: Check for empty playlist ---
@@ -311,7 +311,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 			},
 		}
 
-		log.Printf("[iptv-proxy] %v | %s |Action\tlogin (local)\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+		log.Printf("[stream-share] %v | %s |Action\tlogin (local)\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
 
 		if config.CacheFolder != "" {
 			readableJSON, _ := json.Marshal(loginResp)
@@ -348,7 +348,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 		}
 	}
 
-	log.Printf("[iptv-proxy] %v | %s |Action\t%s\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP(), action)
+	log.Printf("[stream-share] %v | %s |Action\t%s\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP(), action)
 
 	processedResp := ProcessResponse(resp)
 
@@ -397,7 +397,7 @@ func (c *Config) xtreamStream(ctx *gin.Context, oriURL *url.URL) {
 	meta, ok := xtreamM3uCache[m3uURL.String()]
 	d := time.Since(meta.Time)
 	if !ok || d.Hours() >= float64(c.M3UCacheExpiration) {
-		log.Printf("[iptv-proxy] %v | %s | xtream cache m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+		log.Printf("[stream-share] %v | %s | xtream cache m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
 		xtreamM3uCacheLock.RUnlock()
 		playlist, err := m3u.Parse(m3uURL.String())
 		// --- FIX: Check for empty playlist ---
@@ -440,7 +440,7 @@ func (c *Config) xtreamApiGet(ctx *gin.Context) {
 	meta, ok := xtreamM3uCache[cacheName]
 	d := time.Since(meta.Time)
 	if !ok || d.Hours() >= float64(c.M3UCacheExpiration) {
-		log.Printf("[iptv-proxy] %v | %s | xtream cache API m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+		log.Printf("[stream-share] %v | %s | xtream cache API m3u file\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
 		xtreamM3uCacheLock.RUnlock()
 		playlist, err := c.xtreamGenerateM3u(ctx, extension)
 		if err != nil {

@@ -1,4 +1,4 @@
-module github.com/lucasduport/iptv-proxy
+module github.com/lucasduport/stream-share
 
 require (
 	github.com/buger/jsonparser v1.1.1

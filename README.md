@@ -38,7 +38,7 @@ StreamShare is a comprehensive IPTV management solution that allows secure shari
 
 ### Stream Multiplexing Technology
 
-StreamShare's revolutionary feature is its ability to efficiently multiplex streams. When multiple users request the same content:
+StreamShare's cool feature is its ability to efficiently multiplex streams. When multiple users request the same content:
 
 1. The first user request establishes a single connection to the IPTV provider
 2. StreamShare buffers the incoming stream data

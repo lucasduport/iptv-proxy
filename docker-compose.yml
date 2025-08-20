@@ -1,7 +1,7 @@
 services:
-  iptv-proxy:
-    image: lucasduport/iptv-proxy:latest
-    container_name: iptv-proxy
+  stream-share:
+    image: lucasduport/stream-share:latest
+    container_name: stream-share
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -32,7 +32,7 @@ services:
       
       # Debug options
       DEBUG_LOGGING: "true"            # Enable debug logging
-      CACHE_FOLDER: "/root/.iptv-proxy/cache"   # Folder to save responses
+      CACHE_FOLDER: "/root/.stream-share/cache"   # Folder to save responses
       
       # LDAP Authentication
       LDAP_ENABLED: "true"             # Enable LDAP authentication
@@ -66,7 +66,7 @@ services:
       TEMP_LINK_HOURS: "24"            # Temporary download link expiration in hours
 
     volumes:
-      - iptv_config:/root/.iptv-proxy  # Persistent configuration storage
+      - iptv_config:/root/.stream-share  # Persistent configuration storage
       - iptv_data:/data                # Database and other persistent data
 
     depends_on:
@@ -75,7 +75,7 @@ services:
   # PostgreSQL database
   db:
     image: postgres:14-alpine
-    container_name: iptv-proxy-db
+    container_name: stream-share-db
     restart: unless-stopped
     environment:
       POSTGRES_DB: iptvproxy
@@ -91,7 +91,7 @@ services:
   # Adminer for database management (optional)
   adminer:
     image: adminer
-    container_name: iptv-proxy-adminer
+    container_name: stream-share-adminer
     restart: unless-stopped
     ports:
       - "8081:8080"

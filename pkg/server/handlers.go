@@ -1,6 +1,6 @@
 /*
- * Iptv-Proxy is a project to proxyfie an m3u file and to proxyfie an Xtream iptv service (client API).
- * Copyright (C) 2020  Pierre-Emmanuel Jacquier
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/lucasduport/iptv-proxy/pkg/utils"
+	"github.com/lucasduport/stream-share/pkg/utils"
 	"github.com/go-ldap/ldap/v3"
 )
 
@@ -253,7 +253,7 @@ func (c *Config) appAuthenticate(ctx *gin.Context) {
 		ctx.AbortWithError(http.StatusBadRequest, fmt.Errorf("bad body url query parameters")) // nolint: errcheck
 		return
 	}
-	log.Printf("[iptv-proxy] %v | %s |App Auth\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+	log.Printf("[stream-share] %v | %s |App Auth\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
 
 	// Use LDAP authentication if enabled
 	if c.ProxyConfig.LDAPEnabled {
