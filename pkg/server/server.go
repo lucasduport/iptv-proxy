@@ -30,7 +30,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
-	"strings" // FIX: required by endpointAntiColision and replaceURL
+	"strings"
 
 	"github.com/gin-contrib/cors"
 	"github.com/jamesnetherton/m3u"

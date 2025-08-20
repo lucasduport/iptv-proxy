@@ -55,7 +55,7 @@ type Bot struct {
 type vodPendingContext struct {
 	UserID    string
 	ChannelID string
-	Choices   map[int]types.VODResult // 1..10 (0️⃣ represents 10)
+	Choices   map[int]types.VODResult // 1..10 (0 represents 10)
 }
 
 // NewBot creates a new Discord bot
@@ -89,12 +89,12 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		// Polished ready log
 		if s != nil && s.State != nil && s.State.User != nil {
-			utils.InfoLog("✨ Discord ready: %s#%s (%s) | Prefix: %s",
+			utils.InfoLog("Discord ready: %s#%s (%s) | Prefix: %s",
 				s.State.User.Username, s.State.User.Discriminator, s.State.User.ID, bot.prefix)
 		} else {
-			utils.InfoLog("✨ Discord ready: session state not populated yet | Prefix: %s", bot.prefix)
+			utils.InfoLog("Discord ready: session state not populated yet | Prefix: %s", bot.prefix)
 		}
-		utils.InfoLog("ℹ️  Ensure 'MESSAGE CONTENT INTENT' is enabled in the Developer Portal.")
+		utils.WarnLog("Ensure 'MESSAGE CONTENT INTENT' is enabled in the Developer Portal.")
 	})
 
 	// Intents: add reactions handling

@@ -56,7 +56,7 @@ func NewIntegration() (*Integration, error) {
 		apiURL := os.Getenv("DISCORD_API_URL")
 		apiKey := os.Getenv("INTERNAL_API_KEY")
 		if apiKey == "" {
-			utils.WarnLog("INTERNAL_API_KEY not set, Discord bot will not be able to communicate with API")
+			utils.ErrorLog("INTERNAL_API_KEY not set, Discord bot will not be able to communicate with API")
 		}
 		bot, err := NewBot(token, prefix, adminRole, apiURL, apiKey)
 		if err != nil {

@@ -444,7 +444,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	}
 
 	// Set common headers for the request
-	req.Header.Set("User-Agent", "stream-share")
+	req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
 
 	resp, err := sm.httpClient.Do(req)
 	if err != nil {

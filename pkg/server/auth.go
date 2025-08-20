@@ -52,7 +52,7 @@ func (c *Config) apiKeyAuth() gin.HandlerFunc {
 		utils.DebugLog("API Key auth check - received key: %s...", utils.MaskString(key))
 
 		if key != internalAPIKey {
-			utils.WarnLog("API authentication failed - invalid key: %s", utils.MaskString(key))
+			utils.DebugLog("API authentication failed - invalid key: %s", utils.MaskString(key))
 			ctx.AbortWithStatusJSON(401, types.APIResponse{
 				Success: false,
 				Error:   "Invalid API key",

@@ -99,7 +99,7 @@ func (c *Config) ensureVODM3UCache() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "stream-share/1.0")
+	req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -81,7 +81,7 @@ func New(user, password, baseURL, userAgent string) (*Client, error) {
 		Username:  user,
 		Password:  password,
 		BaseURL:   baseURL,
-		UserAgent: userAgent,
+		UserAgent: utils.GetIPTVUserAgent(),
 		Client:    httpClient,
 	}, nil
 }
@@ -134,7 +134,7 @@ func (c *Client) Action(cfg *config.ProxyConfig, action string, q url.Values) (r
             lastErr = err
             continue
         }
-        req.Header.Set("User-Agent", "stream-share")
+        req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
         req.Header.Set("Accept", "application/json, text/plain, */*")
 
         resp, err = client.Do(req)
@@ -210,7 +210,7 @@ func (c *Client) GetXMLTV() ([]byte, error) {
     }
 
     // Set appropriate headers
-    req.Header.Set("User-Agent", c.UserAgent)
+    req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
     req.Header.Set("Accept", "application/xml, text/xml")
     
     // Execute request

@@ -25,7 +25,8 @@ services:
       XTREAM_PASSWORD: ""              # Xtream API password
       XTREAM_BASE_URL: ""              # Xtream API base URL
       XTREAM_API_GET: "false"          # Generate get.php from API
-      
+      USER_AGENT: ""                   # Default is IPTVSmartersPro
+
       # Legacy authentication (when LDAP is disabled)
       USER: ""                         # Username for basic auth
       PASSWORD: ""                     # Password for basic auth

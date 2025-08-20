@@ -35,12 +35,12 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 
 	// Check if database is initialized
 	if c.db == nil {
-		utils.ErrorLog("CRITICAL ERROR: Database not initialized when setting up API")
+		utils.ErrorLog("CRITICAL: Database not initialized when setting up API")
 	}
 
 	// Check if session manager is initialized
 	if c.sessionManager == nil {
-		utils.ErrorLog("CRITICAL ERROR: Session manager not initialized when setting up API")
+		utils.ErrorLog("CRITICAL: Session manager not initialized when setting up API")
 	}
 
 	api := r.Group("/api/internal")
