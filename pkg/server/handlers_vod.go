@@ -19,10 +19,16 @@
 package server
 
 import (
+	"bufio"
 	"fmt"
 	"net/http"
+	"net/url"
+	"os"
 	"time"
 	"strings"
+	"context"
+	"io"
+	"path"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -160,15 +166,24 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 		return
 	}
 
-	// Generate a download URL for the VOD content
+	// Generate a download URL for the VOD content, preserving the original extension from M3U
 	basePath := "movie"
 	if strings.ToLower(req.Type) == "series" {
 		basePath = "series"
 	}
-	// Many Xtream providers require an explicit container extension for VOD/series
-	// Default to .mp4 which is widely supported
-	ext := ".mp4"
-	vodURL := fmt.Sprintf("%s/%s/%s/%s/%s%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, req.StreamID, ext)
+	finalID := req.StreamID
+	if path.Ext(finalID) == "" {
+		// Try to resolve extension from cached M3U (movie/series), then fall back
+		if ext := c.findVODExtensionInCache(basePath, finalID); ext != "" {
+			utils.DebugLog("VOD extension resolved from cache: %s%s", finalID, ext)
+			finalID = finalID + ext
+		} else if basePath == "series" { 
+			// Some providers predominantly use .mkv for series
+			utils.DebugLog("VOD extension not found in cache for series id=%s; defaulting to .mkv", finalID)
+			finalID = finalID + ".mkv"
+		}
+	}
+	vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
 	utils.DebugLog("API: VOD URL created: %s", utils.MaskURL(vodURL))
 
 	// Generate a temporary download token
@@ -201,6 +216,61 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 	})
 }
 
+// pickVODExtension tries a small set of common extensions and returns the first that appears valid for the upstream.
+// It performs quick HEAD requests with a short timeout. Falls back to .mp4 if none are conclusive.
+func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) string {
+	// Allow override via env
+	order := []string{".mp4", ".ts", ".mkv", ""}
+	if v := strings.TrimSpace(utils.GetEnvOrDefault("VOD_EXT_ORDER", "")); v != "" {
+		// comma-separated, keep only known values to avoid surprises
+		parts := strings.Split(v, ",")
+		tmp := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == ".mp4" || p == ".mkv" || p == ".ts" || p == "" { tmp = append(tmp, p) }
+		}
+		if len(tmp) > 0 { order = tmp }
+	}
+	client := &http.Client{ Timeout: 5 * time.Second }
+	for _, ext := range order {
+		url := fmt.Sprintf("%s/%s/%s/%s/%s%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, streamID, ext)
+		req, _ := http.NewRequestWithContext(context.Background(), "HEAD", url, nil)
+		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+		resp, err := client.Do(req)
+		if err != nil { 
+			utils.DebugLog("VOD probe (HEAD) failed for %s: %v", utils.MaskURL(url), err)
+			continue 
+		}
+		resp.Body.Close()
+		// Accept 2xx and 206
+		if (resp.StatusCode >= 200 && resp.StatusCode < 300) || resp.StatusCode == http.StatusPartialContent {
+			utils.DebugLog("VOD probe (HEAD) ok %d for %s", resp.StatusCode, utils.MaskURL(url))
+			return ext
+		}
+		// Some providers return non-standard 461 or block HEAD; try GET range fallback
+		if resp.StatusCode == 461 || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest {
+			utils.DebugLog("VOD probe (HEAD) status %d for %s, trying GET range fallback", resp.StatusCode, utils.MaskURL(url))
+			getReq, _ := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+			getReq.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+			getReq.Header.Set("Range", "bytes=0-0")
+			if getResp, getErr := client.Do(getReq); getErr == nil {
+				io.Copy(io.Discard, getResp.Body)
+				getResp.Body.Close()
+				if (getResp.StatusCode >= 200 && getResp.StatusCode < 300) || getResp.StatusCode == http.StatusPartialContent {
+					utils.DebugLog("VOD probe (GET range) ok %d for %s", getResp.StatusCode, utils.MaskURL(url))
+					return ext
+				}
+				utils.DebugLog("VOD probe (GET range) status %d for %s", getResp.StatusCode, utils.MaskURL(url))
+			} else {
+				utils.DebugLog("VOD probe (GET range) error for %s: %v", utils.MaskURL(url), getErr)
+			}
+		} else {
+			utils.DebugLog("VOD probe (HEAD) status %d for %s", resp.StatusCode, utils.MaskURL(url))
+		}
+	}
+	return ".mp4"
+}
+
 // getVODRequestStatus gets the status of a VOD download request
 func (c *Config) getVODRequestStatus(ctx *gin.Context) {
 	requestID := ctx.Param("requestid")
@@ -214,4 +284,46 @@ func (c *Config) getVODRequestStatus(ctx *gin.Context) {
 			"progress": 100,
 		},
 	})
+}
+
+// findVODExtensionInCache tries to locate the original extension for a given stream ID
+// by scanning the cached VOD M3U or series entries. Returns empty string if unknown.
+func (c *Config) findVODExtensionInCache(basePath, streamID string) string {
+	// First scan the cached VOD M3U for both movies and series
+	if m3uPath, err := c.ensureVODM3UCache(); err == nil {
+		if ext := findExtInM3U(m3uPath, basePath, streamID); ext != "" {
+			return ext
+		}
+	}
+	// Fallback: proxified main M3U if available
+	c.ensureChannelIndex()
+	if strings.TrimSpace(c.proxyfiedM3UPath) != "" {
+		if ext := findExtInM3U(c.proxyfiedM3UPath, basePath, streamID); ext != "" {
+			return ext
+		}
+	}
+	return ""
+}
+
+// findExtInM3U scans a given M3U file for an entry path containing basePath and having
+// the last segment starting with streamID plus an extension.
+func findExtInM3U(filePath, basePath, streamID string) string {
+	f, err := os.Open(filePath)
+	if err != nil { return "" }
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") { continue }
+		if !(strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://")) { continue }
+		// Quick path filter by basePath
+		if !strings.Contains(line, "/"+basePath+"/") { continue }
+		u, err := url.Parse(line)
+		if err != nil { continue }
+		last := path.Base(u.Path)
+		if strings.HasPrefix(last, streamID+".") {
+			return path.Ext(last)
+		}
+	}
+	return ""
 }

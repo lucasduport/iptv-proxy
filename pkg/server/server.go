@@ -387,8 +387,11 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 		return
 	}
 
+	// Pick filename extension from upstream when available (default mp4)
+	ext := strings.ToLower(path.Ext(targetURL.Path))
+	if ext == "" { ext = ".mp4" }
 	// Add appropriate headers for download
-	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.mp4"`, tempLink.Title))
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, tempLink.Title, ext))
 
 	// For downloads, use direct proxy to preserve Content-Length and allow
 	// browser to show accurate remaining time instead of "Unknown time left".
@@ -467,6 +470,9 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		contentType = "application/vnd.apple.mpegurl"
 	} else if ext == ".mp4" {
 		contentType = "video/mp4"
+	} else if ext == ".mkv" {
+		// Matroska container commonly served with this type
+		contentType = "video/x-matroska"
 	}
 	ctx.Header("Content-Type", contentType)
 	// Disable intermediary buffering and keep connection alive

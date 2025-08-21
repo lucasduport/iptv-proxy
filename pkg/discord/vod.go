@@ -1,13 +1,14 @@
 package discord
 
 import (
-    "fmt"
-    "strings"
-    "time"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
 
-    "github.com/bwmarrin/discordgo"
-    "github.com/lucasduport/stream-share/pkg/types"
-    "github.com/lucasduport/stream-share/pkg/utils"
+	"github.com/bwmarrin/discordgo"
+	"github.com/lucasduport/stream-share/pkg/types"
+	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
 // (movie-related types and functions moved to movie.go)
@@ -54,7 +55,7 @@ func (b *Bot) handleShow(s *discordgo.Session, m *discordgo.MessageCreate, args 
 	resultsData, ok := data["results"].([]interface{})
     if !ok || len(resultsData) == 0 { _ = editEmbed(s, loading, colorInfo, "🔎 No Results", fmt.Sprintf("No shows found for `%s`.", query)); return }
 
-	// Build a map: show title -> seasons -> episodes, based on series results
+	// Build a map: show title -> seasons -> episodes, based on results
 	showMap := map[string]map[int][]struct{ idx int; item types.VODResult }{}
 	// collect distinct shows preserving natural order
 	showOrder := []string{}
@@ -79,15 +80,28 @@ func (b *Bot) handleShow(s *discordgo.Session, m *discordgo.MessageCreate, args 
 			if v, ok := rm["Episode"]; ok {
 				switch t := v.(type) { case float64: vr.Episode = int(t) }
 			}
-			if strings.ToLower(vr.StreamType) != "series" { continue }
+			// Accept both true series and episodic entries from M3U that look like SxxEyy
 			show := vr.SeriesTitle
-			if show == "" {
-				// try to extract series title from Title like "Name S01E02 — ..."
-				show = strings.TrimSpace(strings.Split(vr.Title, " S")[0])
+			season := vr.Season
+			episode := vr.Episode
+			epTitle := vr.EpisodeTitle
+			// Infer from title when type/fields are missing
+			if show == "" || season == 0 || episode == 0 {
+				if inferred, name, sn, ep, epT := inferSeriesFromTitle(vr.Title); inferred {
+					show = name
+					season = sn
+					episode = ep
+					if epTitle == "" { epTitle = epT }
+				}
 			}
-			if show == "" { continue }
+			if show == "" || season == 0 || episode == 0 { continue }
+			// Fill inferred metadata but keep original StreamType (download path may depend on it)
+			vr.SeriesTitle = show
+			vr.Season = season
+			vr.Episode = episode
+			if vr.EpisodeTitle == "" { vr.EpisodeTitle = epTitle }
 			if _, ok := showMap[show]; !ok { showMap[show] = map[int][]struct{ idx int; item types.VODResult }{}; showOrder = append(showOrder, show) }
-			showMap[show][vr.Season] = append(showMap[show][vr.Season], struct{ idx int; item types.VODResult }{idx: idx, item: vr})
+			showMap[show][season] = append(showMap[show][season], struct{ idx int; item types.VODResult }{idx: idx, item: vr})
 		}
 	}
 	if len(showOrder) == 0 { b.info(m.ChannelID, "📺 No Shows Found", fmt.Sprintf("No shows found for `%s`.", query)); return }
@@ -124,4 +138,53 @@ func (b *Bot) handleShow(s *discordgo.Session, m *discordgo.MessageCreate, args 
         b.selectLock.Unlock()
         b.setShowHierarchy(loading.ID, showMap, showOrder)
     }
+}
+
+// inferSeriesFromTitle tries to parse titles like:
+//   "Game of Thrones (MULTI) FHD S07 E05"
+//   "Game of Thrones S08E01 — Winterfell"
+//   "The Office (US) 1080p S3E12"
+// Returns (true, seriesTitle, season, episode, episodeTitle) on success.
+func inferSeriesFromTitle(title string) (bool, string, int, int, string) {
+	t := strings.TrimSpace(title)
+	if t == "" { return false, "", 0, 0, "" }
+	// Variant 1: ... S07 E05 ... (optional separator and ep title at end)
+	re1 := regexp.MustCompile(`(?i)^(.*?)\s*(?:\([^)]*\)\s*)?(?:FHD|HD|UHD|4K|1080p|720p|MULTI)?\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:\u2014]\s*(.*))?$`)
+	if m := re1.FindStringSubmatch(t); m != nil {
+		name := cleanSeriesName(m[1])
+		sn := atoiSafe(m[2])
+		ep := atoiSafe(m[3])
+		epTitle := strings.TrimSpace(m[4])
+		return true, name, sn, ep, epTitle
+	}
+	// Variant 2: allow compact S01E02
+	re2 := regexp.MustCompile(`(?i)^(.*?)\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:\u2014]\s*(.*))?`)
+	if m := re2.FindStringSubmatch(t); m != nil {
+		name := cleanSeriesName(m[1])
+		sn := atoiSafe(m[2])
+		ep := atoiSafe(m[3])
+		epTitle := strings.TrimSpace(m[4])
+		return true, name, sn, ep, epTitle
+	}
+	return false, "", 0, 0, ""
+}
+
+func cleanSeriesName(s string) string {
+	s = strings.TrimSpace(s)
+	// Remove trailing quality tokens if any
+	s = regexp.MustCompile(`(?i)\b(FHD|HD|UHD|4K|1080p|720p|MULTI)\b`).ReplaceAllString(s, "")
+	// Remove stray separators
+	s = strings.Trim(s, "-—–:|• ")
+	// Collapse spaces
+	s = strings.Join(strings.Fields(s), " ")
+	return s
+}
+
+func atoiSafe(s string) int {
+	n := 0
+	for _, ch := range s {
+		if ch < '0' || ch > '9' { continue }
+		n = n*10 + int(ch-'0')
+	}
+	return n
 }

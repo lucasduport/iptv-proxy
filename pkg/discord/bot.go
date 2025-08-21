@@ -261,7 +261,9 @@ func (b *Bot) renderEpisodePicker(s *discordgo.Session, channelID, messageID, us
 	opts := make([]discordgo.SelectMenuOption, 0, end-start)
 	for i := start; i < end; i++ {
 		ep := episodes[i]
-		label := fmt.Sprintf("S%02dE%02d — %s", season, ep.Episode, ep.EpisodeTitle)
+		epName := ep.EpisodeTitle
+		if strings.TrimSpace(epName) == "" { epName = ep.Title }
+		label := fmt.Sprintf("S%02dE%02d — %s", season, ep.Episode, epName)
 		if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
 		opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: strconv.Itoa(i)})
 	}

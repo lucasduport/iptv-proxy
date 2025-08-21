@@ -20,20 +20,10 @@ package utils
 
 import "os"
 
-// GetIPTVUserAgent returns the user agent to use for IPTV upstream requests
-// Uses the USER_AGENT environment variable if set, otherwise defaults to "IPTVSmartersPro"
-func GetIPTVUserAgent() string {
-	userAgent := os.Getenv("USER_AGENT")
-	if userAgent == "" {
-		return "IPTVSmartersPro"
-	}
-	return userAgent
-}
-
-// GetLanguageHeader returns the preferred Accept-Language header, defaulting to en_US
-func GetLanguageHeader() string {
-	if v := os.Getenv("ACCEPT_LANGUAGE"); v != "" {
+// GetEnvOrDefault returns the environment variable value if set, otherwise the provided default.
+func GetEnvOrDefault(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	return "en_US"
+	return defaultValue
 }

@@ -96,7 +96,7 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		ForceAttemptHTTP2:     true,
+		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -116,8 +116,35 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 		return
 	}
 
-	// Copy relevant headers from the original request
-	mergeHttpHeader(req.Header, ctx.Request.Header)
+	// For VOD endpoints, some providers are extremely strict: use a whitelist header set
+	p := oriURL.Path
+	isVOD := strings.Contains(p, "/movie/") || strings.Contains(p, "/series/")
+	if ext := strings.ToLower(path.Ext(p)); ext == ".mp4" || ext == ".mkv" || ext == ".ts" { isVOD = true }
+
+	if isVOD {
+		// Start with clean headers and add only known-good ones
+		clean := http.Header{}
+		// Accept
+		if v := ctx.Request.Header.Get("Accept"); v != "" { clean.Set("Accept", v) } else { clean.Set("Accept", "*/*") }
+		// Accept-Language
+	if v := ctx.Request.Header.Get("Accept-Language"); v != "" { clean.Set("Accept-Language", v) } else { clean.Set("Accept-Language", utils.GetLanguageHeader()) }
+		// Range
+		if v := ctx.Request.Header.Get("Range"); v != "" { clean.Set("Range", v) } else { clean.Set("Range", "bytes=0-") }
+		// Connection
+		clean.Set("Connection", "keep-alive")
+		// UA and encoding
+		clean.Set("User-Agent", utils.GetIPTVUserAgent())
+		clean.Set("Accept-Encoding", "identity")
+		req.Header = clean
+	} else {
+		// Non-VOD: copy and normalize minimally
+		mergeHttpHeader(req.Header, ctx.Request.Header)
+		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+		req.Header.Del("Accept-Encoding")
+		req.Header.Set("Accept-Encoding", "identity")
+		if req.Header.Get("Accept") == "" { req.Header.Set("Accept", "*/*") }
+		if req.Header.Get("Connection") == "" { req.Header.Set("Connection", "keep-alive") }
+	}
 
 	// Execute the upstream request
 	resp, err := client.Do(req)
@@ -129,6 +156,9 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 	defer resp.Body.Close()
 
 	utils.DebugLog("-> Upstream response status: %d", resp.StatusCode)
+	if resp.StatusCode == 461 {
+		utils.DebugLog("Upstream returned 461 (often blocks HEAD/Range or unexpected headers). UA=%q, AE=%q", req.Header.Get("User-Agent"), req.Header.Get("Accept-Encoding"))
+	}
 
 	// Copy response headers and status code
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)

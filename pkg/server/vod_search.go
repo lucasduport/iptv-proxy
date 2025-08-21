@@ -20,7 +20,7 @@
 
 import (
 	"bufio"
-	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,7 +35,7 @@ import (
 
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
-	xtreamcodes "github.com/tellytv/go.xtream-codes"
+	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream-proxy"
 )
 
 var vodM3UMu sync.Mutex
@@ -74,7 +74,7 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 	if len(results) < maxProbe {
 		maxProbe = len(results)
 	}
-	client := &http.Client{Timeout: 8 * time.Second}
+	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { if len(via) >= 10 { return http.ErrUseLastResponse }; return nil }}
 	for i := 0; i < maxProbe; i++ {
 		streamID := results[i].StreamID
 		if streamID == "" {
@@ -90,26 +90,15 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 			basePath = "series"
 		}
 		vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, streamID)
-		// Try HEAD first
-		req, _ := http.NewRequest("HEAD", vodURL, nil)
-		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-		if resp, err := client.Do(req); err == nil {
-			resp.Body.Close()
-			if cl := resp.Header.Get("Content-Length"); cl != "" {
-				if sz, perr := parseInt64(cl); perr == nil && sz > 0 {
-					results[i].SizeBytes = sz
-					results[i].Size = utils.HumanBytes(sz)
-					continue
-				}
-			}
-		}
-		// Fallback: range request to get Content-Range
-		req, _ = http.NewRequest("GET", vodURL, nil)
+		// Prefer GET with Range (providers often block HEAD); allow redirects to capture tokenized location
+		req, _ := http.NewRequest("GET", vodURL, nil)
 		req.Header.Set("Range", "bytes=0-0")
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+		req.Header.Set("Accept-Encoding", "identity")
 		if resp, err := client.Do(req); err == nil {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+			// If 3xx with Location, ignore size but this confirms URL is valid
 			if cr := resp.Header.Get("Content-Range"); cr != "" {
 				if total := strings.TrimSpace(cr[strings.LastIndex(cr, "/")+1:]); total != "*" {
 					if sz, perr := parseInt64(total); perr == nil && sz > 0 {
@@ -295,56 +284,101 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 	if q == "" {
 		return nil, nil
 	}
-	// Initialize Xtream client
-	client, err := xtreamcodes.NewClientWithUserAgent(
-		context.Background(), c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, utils.GetIPTVUserAgent(),
-	)
+	// Use resilient client to avoid FlexInt unmarshaling issues
+	utils.DebugLog("Series search: using resilient Xtream client (baseURL=%s, user=%s)", c.XtreamBaseURL, utils.MaskString(c.XtreamUser.String()))
+	cli, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, utils.GetIPTVUserAgent())
 	if err != nil {
-		utils.WarnLog("Series search: failed to init Xtream client: %v", err)
+		utils.WarnLog("Series search: failed to create resilient client: %v", err)
 		return nil, err
 	}
-	// Get all series; filter by name first
-	series, err := client.GetSeries("")
+
+	resp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_series", url.Values{})
 	if err != nil {
+		utils.WarnLog("Series search: get_series failed (HTTP %d, CT=%s): %v", httpcode, contentType, err)
 		return nil, err
 	}
+
+	arr, ok := resp.([]interface{})
+	if !ok {
+		utils.WarnLog("Series search: unexpected get_series format: %T", resp)
+		return nil, fmt.Errorf("unexpected get_series format: %T", resp)
+	}
+
 	out := make([]types.VODResult, 0, 50)
-	for _, s := range series {
-		seriesName := s.Name
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		seriesName := fmt.Sprintf("%v", m["name"]) 
 		if seriesName == "" {
 			continue
 		}
-		// simple filter: if query not in series name, skip
 		if !strings.Contains(strings.ToLower(seriesName), q) {
 			continue
 		}
-		// Fetch per-series info to get episodes
-		si, err := client.GetSeriesInfo(fmt.Sprintf("%d", s.SeriesID))
-		if err != nil {
+		seriesID := fmt.Sprintf("%v", m["series_id"])
+		if seriesID == "" || seriesID == "<nil>" {
 			continue
 		}
-		// Flatten episodes
-		for seasonStr, eps := range si.Episodes {
+		genre := fmt.Sprintf("%v", m["genre"]) // may be empty
+		year := fmt.Sprintf("%v", firstNonEmpty(m["releaseDate"], m["release_date"]))
+
+		utils.DebugLog("Series search: fetching series info for '%s' (series_id=%s)", seriesName, seriesID)
+		infoResp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_series_info", url.Values{"series_id": {seriesID}})
+		if err != nil {
+			utils.WarnLog("Series search: get_series_info failed for id=%s: %v (HTTP %d, CT=%s)", seriesID, err, httpcode, contentType)
+			continue
+		}
+		im, ok := infoResp.(map[string]interface{})
+		if !ok {
+			utils.WarnLog("Series search: unexpected series_info format for id=%s: %T", seriesID, infoResp)
+			continue
+		}
+		epsBySeason, ok := im["episodes"].(map[string]interface{})
+		if !ok {
+			// Some providers use episodes as array with season inside
+			continue
+		}
+		for seasonStr, epsV := range epsBySeason {
 			seasonNum, _ := strconv.Atoi(seasonStr)
-			for _, ep := range eps {
-				title := ep.Title
-				// Accept matches on episode title as well
+			eps, ok := epsV.([]interface{})
+			if !ok {
+				continue
+			}
+			for _, e := range eps {
+				em, ok := e.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				title := fmt.Sprintf("%v", em["title"])
 				if !strings.Contains(strings.ToLower(title), q) && !strings.Contains(strings.ToLower(seriesName), q) {
 					continue
 				}
-				streamID := ep.ID
+				streamID := fmt.Sprintf("%v", firstNonEmpty(em["id"], em["stream_id"]))
+				if streamID == "" || streamID == "<nil>" {
+					continue
+				}
+				epNum := toInt(em["episode_num"]) // best-effort
+				// info subobject for duration/rating
+				var duration, rating string
+				if infoSub, ok := em["info"].(map[string]interface{}); ok {
+					duration = fmt.Sprintf("%v", infoSub["duration"]) // may be ""
+					rating = fmt.Sprintf("%v", firstNonEmpty(infoSub["rating"], infoSub["vote_average"]))
+				}
+
 				out = append(out, types.VODResult{
-					ID:          streamID,
-					Title:       fmt.Sprintf("%s S%02dE%02d — %s", seriesName, seasonNum, int(ep.EpisodeNum), title),
-					Category:    s.Genre,
-					Duration:    ep.Info.Duration,
-					Year:        s.ReleaseDate,
-					Rating:      fmt.Sprintf("%v", float64(ep.Info.Rating)),
-					StreamID:    streamID,
-					StreamType:  "series",
-					SeriesTitle: seriesName,
-					Season:      seasonNum,
-					Episode:     int(ep.EpisodeNum),
+					ID:           streamID,
+					Title:        fmt.Sprintf("%s S%02dE%02d — %s", seriesName, seasonNum, epNum, title),
+					Category:     genre,
+					Duration:     duration,
+					Year:         year,
+					Rating:       rating,
+					StreamID:     streamID,
+					StreamType:   "series",
+					SeriesTitle:  seriesName,
+					Season:       seasonNum,
+					Episode:      epNum,
 					EpisodeTitle: title,
 				})
 				if len(out) >= 50 {
@@ -353,5 +387,111 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 			}
 		}
 	}
+	utils.DebugLog("Series search: returning %d results", len(out))
 	return out, nil
+}
+
+// logRawXtreamSeriesDiagnostics performs raw calls to Xtream API to collect JSON payloads
+// for series and a matching series_info to help diagnose unmarshaling issues in third-party clients.
+func (c *Config) logRawXtreamSeriesDiagnostics(q string) {
+	// Create our resilient client that parses into generic interfaces
+	cli, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, utils.GetIPTVUserAgent())
+	if err != nil {
+		utils.WarnLog("Diagnostics: failed to create raw Xtream client: %v", err)
+		return
+	}
+
+	// Fetch series list
+	resp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_series", url.Values{})
+	if err != nil {
+		utils.WarnLog("Diagnostics: get_series failed: %v (HTTP %d, CT=%s)", err, httpcode, contentType)
+		return
+	}
+	// Write raw to file if debugging enabled
+	if b, ok := tryJSONMarshal(resp); ok {
+		filename := fmt.Sprintf("series_raw_%s.json", time.Now().Format("20060102_150405"))
+		utils.WriteResponseToFile(filename, b, contentType)
+	}
+
+	// Try to find one series matching q and fetch its info
+	var seriesID string
+	switch arr := resp.(type) {
+	case []interface{}:
+		for _, item := range arr {
+			m, ok := item.(map[string]interface{})
+			if !ok { continue }
+			name := fmt.Sprintf("%v", m["name"])
+			if name == "" { continue }
+			if strings.Contains(strings.ToLower(name), q) {
+				seriesID = fmt.Sprintf("%v", m["series_id"])
+				utils.DebugLog("Diagnostics: matched series '%s' with id=%s", name, seriesID)
+				break
+			}
+		}
+	}
+	if seriesID == "" {
+		utils.DebugLog("Diagnostics: no matching series found for query %q to fetch series_info", q)
+		return
+	}
+	infoResp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_series_info", url.Values{"series_id": {seriesID}})
+	if err != nil {
+		utils.WarnLog("Diagnostics: get_series_info failed for id=%s: %v (HTTP %d, CT=%s)", seriesID, err, httpcode, contentType)
+		return
+	}
+	if b, ok := tryJSONMarshal(infoResp); ok {
+		filename := fmt.Sprintf("series_info_%s_%s.json", seriesID, time.Now().Format("20060102_150405"))
+		utils.WriteResponseToFile(filename, b, contentType)
+	}
+}
+
+// tryJSONMarshal marshals v to pretty JSON bytes for logging
+func tryJSONMarshal(v interface{}) ([]byte, bool) {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		utils.DebugLog("Diagnostics: failed to marshal JSON: %v", err)
+		return nil, false
+	}
+	return b, true
+}
+
+// firstNonEmpty returns the first non-empty/non-nil value among candidates
+func firstNonEmpty(values ...interface{}) interface{} {
+	for _, v := range values {
+		if v == nil {
+			continue
+		}
+		s := fmt.Sprintf("%v", v)
+		if s != "" && s != "<nil>" {
+			return v
+		}
+	}
+	return ""
+}
+
+// toInt best-effort conversion from interface{} number/string to int
+func toInt(v interface{}) int {
+	if v == nil {
+		return 0
+	}
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case json.Number:
+		i, _ := t.Int64()
+		return int(i)
+	default:
+		s := fmt.Sprintf("%v", v)
+		if s == "" || s == "<nil>" {
+			return 0
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
 }

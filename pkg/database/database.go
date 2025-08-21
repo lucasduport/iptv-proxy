@@ -21,7 +21,6 @@ package database
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/lucasduport/stream-share/pkg/types"
@@ -39,11 +38,11 @@ type DBManager struct {
 func NewDBManager(_ string) (*DBManager, error) {
 	utils.InfoLog("Initializing PostgreSQL database connection")
 
-	host := getEnvOrDefault("DB_HOST", "localhost")
-	port := getEnvOrDefault("DB_PORT", "5432")
-	dbName := getEnvOrDefault("DB_NAME", "iptvproxy")
-	user := getEnvOrDefault("DB_USER", "postgres")
-	password := getEnvOrDefault("DB_PASSWORD", "")
+	host := utils.GetEnvOrDefault("DB_HOST", "localhost")
+	port := utils.GetEnvOrDefault("DB_PORT", "5432")
+	dbName := utils.GetEnvOrDefault("DB_NAME", "iptvproxy")
+	user := utils.GetEnvOrDefault("DB_USER", "postgres")
+	password := utils.GetEnvOrDefault("DB_PASSWORD", "")
 
 	connStr := fmt.Sprintf(
 		"host=%s port=%s dbname=%s user=%s password=%s sslmode=disable",
@@ -354,15 +353,4 @@ func (m *DBManager) GetStreamHistoryStats() (map[string]interface{}, error) {
 	stats["active_users_24h"] = activeUsers
 
 	return stats, nil
-}
-
-// Helper functions
-
-// getEnvOrDefault gets an environment variable value or returns the default
-func getEnvOrDefault(key, defaultValue string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
-	}
-	return value
 }
