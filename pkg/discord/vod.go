@@ -149,7 +149,7 @@ func inferSeriesFromTitle(title string) (bool, string, int, int, string) {
 	t := strings.TrimSpace(title)
 	if t == "" { return false, "", 0, 0, "" }
 	// Variant 1: ... S07 E05 ... (optional separator and ep title at end)
-	re1 := regexp.MustCompile(`(?i)^(.*?)\s*(?:\([^)]*\)\s*)?(?:FHD|HD|UHD|4K|1080p|720p|MULTI)?\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:\u2014]\s*(.*))?$`)
+	re1 := regexp.MustCompile(`(?i)^(.*?)\s*(?:\([^)]*\)\s*)?(?:FHD|HD|UHD|4K|1080p|720p|MULTI)?\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:]\s*(.*))?$`)
 	if m := re1.FindStringSubmatch(t); m != nil {
 		name := cleanSeriesName(m[1])
 		sn := atoiSafe(m[2])
@@ -158,7 +158,7 @@ func inferSeriesFromTitle(title string) (bool, string, int, int, string) {
 		return true, name, sn, ep, epTitle
 	}
 	// Variant 2: allow compact S01E02
-	re2 := regexp.MustCompile(`(?i)^(.*?)\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:\u2014]\s*(.*))?`)
+	re2 := regexp.MustCompile(`(?i)^(.*?)\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:]\s*(.*))?`)
 	if m := re2.FindStringSubmatch(t); m != nil {
 		name := cleanSeriesName(m[1])
 		sn := atoiSafe(m[2])

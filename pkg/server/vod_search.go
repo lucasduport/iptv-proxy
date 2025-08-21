@@ -28,10 +28,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"regexp"
 
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
@@ -66,6 +68,10 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 	seriesResults, err := c.searchXtreamSeries(query)
 	if err == nil && len(seriesResults) > 0 {
 		results = append(results, seriesResults...)
+	}
+	// And scan local M3U for series entries as a fallback (provider APIs can be flaky)
+	if sres, err := searchSeriesInM3UFile(m3uPath, query); err == nil && len(sres) > 0 {
+		results = append(results, sres...)
 	}
 
 	// Best-effort: probe size for first few results to display in Discord
@@ -110,6 +116,8 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 		}
 	}
 
+	// Sort results by title for stable ordering
+	sort.SliceStable(results, func(i, j int) bool { return strings.ToLower(results[i].Title) < strings.ToLower(results[j].Title) })
 	utils.DebugLog("VOD search returned %d results for query: %s", len(results), query)
 	return results, nil
 }
@@ -183,7 +191,7 @@ func searchVODInM3UFile(m3uPath string, query string) ([]types.VODResult, error)
 	}
 	defer f.Close()
 
-	q := strings.ToLower(strings.TrimSpace(query))
+	q := strings.TrimSpace(query)
 	sc := bufio.NewScanner(f)
 	lastEXTINF := ""
 	results := make([]types.VODResult, 0, 50)
@@ -232,8 +240,8 @@ func searchVODInM3UFile(m3uPath string, query string) ([]types.VODResult, error)
 				title = path.Base(u.Path)
 			}
 
-			// Filter by query if provided
-			if q != "" && !strings.Contains(strings.ToLower(title), q) {
+			// Filter by query if provided: simple all-words contains (case-insensitive)
+			if q != "" && !simpleAllWordsContains(q, title) {
 				continue
 			}
 
@@ -278,9 +286,84 @@ func parseInt64(s string) (int64, error) {
 	return n, err
 }
 
+// simpleAllWordsContains: split query by spaces and ensure each word is contained (case-insensitive) in text.
+func simpleAllWordsContains(query, text string) bool {
+	q := strings.TrimSpace(query)
+	if q == "" { return true }
+	t := strings.ToLower(text)
+	for _, w := range strings.Fields(strings.ToLower(q)) {
+		if !strings.Contains(t, w) { return false }
+	}
+	return true
+}
+
+
+// searchSeriesInM3UFile scans the cached M3U and returns episodic entries as series results.
+func searchSeriesInM3UFile(m3uPath string, query string) ([]types.VODResult, error) {
+	f, err := os.Open(m3uPath)
+	if err != nil { return nil, err }
+	defer f.Close()
+
+	q := strings.TrimSpace(query)
+	sc := bufio.NewScanner(f)
+	lastEXTINF := ""
+	results := make([]types.VODResult, 0, 50)
+	// Regexes to extract S/E and split title
+	reSE := regexp.MustCompile(`(?i)\bS(\d{1,2})\s*[EExx×](\d{1,2})\b`)
+
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" { continue }
+		if strings.HasPrefix(line, "#EXTINF:") { lastEXTINF = line; continue }
+		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+			u, err := url.Parse(line); if err != nil { continue }
+			if !strings.Contains(u.Path, "/series/") { continue }
+			title := ""; category := ""
+			if lastEXTINF != "" {
+				if idx := strings.LastIndex(lastEXTINF, ","); idx != -1 && idx+1 < len(lastEXTINF) {
+					title = strings.TrimSpace(lastEXTINF[idx+1:])
+				}
+				attrs := lastEXTINF
+				if i := strings.Index(attrs, " "); i != -1 { attrs = attrs[i+1:] }
+				const key = `group-title="`
+				if pos := strings.Index(attrs, key); pos != -1 { start := pos + len(key); if end := strings.Index(attrs[start:], `"`); end != -1 { category = attrs[start:start+end] } }
+			}
+			if title == "" { title = path.Base(u.Path) }
+			if q != "" && !simpleAllWordsContains(q, title) { lastEXTINF = ""; continue }
+			// Extract S/E
+			season, episode := 0, 0
+			if m := reSE.FindStringSubmatch(title); m != nil {
+				season, _ = strconv.Atoi(m[1])
+				episode, _ = strconv.Atoi(m[2])
+			}
+			seriesTitle := title
+			if i := reSE.FindStringIndex(seriesTitle); i != nil { seriesTitle = strings.TrimSpace(strings.Trim(seriesTitle[:i[0]], "-—–:|• ")) }
+			// StreamID is the last path segment
+			streamID := path.Base(u.Path)
+			results = append(results, types.VODResult{
+				ID:           streamID,
+				Title:        title,
+				Category:     category,
+				Duration:     "",
+				Year:         "",
+				Rating:       "",
+				StreamID:     streamID,
+				StreamType:   "series",
+				SeriesTitle:  seriesTitle,
+				Season:       season,
+				Episode:      episode,
+				EpisodeTitle: "",
+			})
+			lastEXTINF = ""
+		}
+	}
+	if err := sc.Err(); err != nil { return nil, err }
+	return results, nil
+}
+
 // searchXtreamSeries searches series and flattens episodes matching the query
 func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
-	q := strings.ToLower(strings.TrimSpace(query))
+	q := strings.TrimSpace(query)
 	if q == "" {
 		return nil, nil
 	}
@@ -314,7 +397,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		if seriesName == "" {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(seriesName), q) {
+	if !simpleAllWordsContains(q, seriesName) {
 			continue
 		}
 		seriesID := fmt.Sprintf("%v", m["series_id"])
@@ -352,7 +435,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 					continue
 				}
 				title := fmt.Sprintf("%v", em["title"])
-				if !strings.Contains(strings.ToLower(title), q) && !strings.Contains(strings.ToLower(seriesName), q) {
+				if !simpleAllWordsContains(q, title) && !simpleAllWordsContains(q, seriesName) {
 					continue
 				}
 				streamID := fmt.Sprintf("%v", firstNonEmpty(em["id"], em["stream_id"]))
@@ -485,9 +568,6 @@ func toInt(v interface{}) int {
 		return int(i)
 	default:
 		s := fmt.Sprintf("%v", v)
-		if s == "" || s == "<nil>" {
-			return 0
-		}
 		n, err := strconv.Atoi(s)
 		if err != nil {
 			return 0
