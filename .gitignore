@@ -24,3 +24,5 @@ iptv/iptv.m3u
 /.vscode
 
 .docker-compose.yml
+
+dist/
