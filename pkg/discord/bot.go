@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +51,13 @@ type Bot struct {
 	// Add: track pending VOD choices per sent message (for reaction selection)
 	pendingVODByMsg  map[string]*vodPendingContext // messageID -> context
 	pendingMsgLock   sync.RWMutex
+	// New: component-based VOD selection context (single message with dropdown + buttons)
+	pendingVODSelect map[string]*vodSelectContext // messageID -> selection context
+	selectLock       sync.RWMutex
+	// Show flow: map message -> hierarchy and selection state
+	showFlows map[string]*showHierarchy
+	showState map[string]*showState
+	showLock  sync.RWMutex
 }
 
 // Context for reaction-based VOD selection
@@ -56,6 +65,21 @@ type vodPendingContext struct {
 	UserID    string
 	ChannelID string
 	Choices   map[int]types.VODResult // 1..10 (0 represents 10)
+}
+
+// Hierarchy for shows: show -> seasons -> episodes
+type showHierarchy struct {
+	Order []string
+	Data  map[string]map[int][]types.VODResult
+}
+
+// Current user selection for a show flow
+type showState struct {
+	UserID        string
+	SelectedShow  string
+	SelectedSeason int
+	EpisodePage   int
+	PerPage       int
 }
 
 // NewBot creates a new Discord bot
@@ -79,13 +103,18 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 			Timeout: 10 * time.Second,
 		},
 		// Added maps/locks for reaction-based selection
-		pendingVODByMsg: make(map[string]*vodPendingContext),
+		pendingVODByMsg:  make(map[string]*vodPendingContext),
+		pendingVODSelect: make(map[string]*vodSelectContext),
+		showFlows:        make(map[string]*showHierarchy),
+		showState:        make(map[string]*showState),
 	}
 
 	// Register handlers
 	dg.AddHandler(bot.messageCreate)
 	// Handle reactions for selection
 	dg.AddHandler(bot.messageReactionAdd)
+	// Handle interactions (components)
+	dg.AddHandler(bot.handleInteractionCreate)
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		// Polished ready log
 		if s != nil && s.State != nil && s.State.User != nil {
@@ -131,6 +160,7 @@ func (b *Bot) cleanupRoutine() {
 	for range ticker.C {
 		b.cleanupExpiredVODLinks()
 		b.cleanupExpiredLinkTokens()
+	b.cleanupExpiredVODSelects()
 	}
 }
 
@@ -152,6 +182,102 @@ func (b *Bot) cleanupExpiredLinkTokens() {
 	// For simplicity, just clear all link tokens
 	// In a real implementation, you'd check timestamps
 	b.linkTokens = make(map[string]string)
+}
+
+// cleanupExpiredVODSelects removes old interactive contexts to prevent leaks
+func (b *Bot) cleanupExpiredVODSelects() {
+	b.selectLock.Lock()
+	defer b.selectLock.Unlock()
+	// expire after 1 hour
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for msgID, ctx := range b.pendingVODSelect {
+		if ctx.Created.Before(cutoff) {
+			delete(b.pendingVODSelect, msgID)
+		}
+	}
+}
+
+// ===== Show selection helpers =====
+func (b *Bot) setShowHierarchy(messageID string, raw map[string]map[int][]struct{ idx int; item types.VODResult }, order []string) {
+	// Convert raw episodes to VODResult and sort by season and episode number
+	data := make(map[string]map[int][]types.VODResult, len(raw))
+	for show, seasons := range raw {
+		data[show] = make(map[int][]types.VODResult, len(seasons))
+		for season, eps := range seasons {
+			// extract VODResult slice
+			arr := make([]types.VODResult, 0, len(eps))
+			for _, e := range eps { arr = append(arr, e.item) }
+			// sort by Episode ascending, then Title
+			sort.SliceStable(arr, func(i, j int) bool {
+				if arr[i].Episode == arr[j].Episode { return arr[i].Title < arr[j].Title }
+				return arr[i].Episode < arr[j].Episode
+			})
+			data[show][season] = arr
+		}
+	}
+	b.showLock.Lock()
+	b.showFlows[messageID] = &showHierarchy{Order: order, Data: data}
+	b.showLock.Unlock()
+}
+
+func (b *Bot) renderSeasonPicker(s *discordgo.Session, channelID, messageID, userID, show string) error {
+	b.showLock.RLock()
+	flow := b.showFlows[messageID]
+	b.showLock.RUnlock()
+	if flow == nil { return fmt.Errorf("no flow") }
+	seasons := make([]int, 0, len(flow.Data[show]))
+	for sn := range flow.Data[show] { seasons = append(seasons, sn) }
+	sort.Ints(seasons)
+	opts := make([]discordgo.SelectMenuOption, 0, len(seasons))
+	for _, sn := range seasons {
+		opts = append(opts, discordgo.SelectMenuOption{Label: fmt.Sprintf("Season %d", sn), Value: strconv.Itoa(sn)})
+	}
+	one := 1
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.SelectMenu{CustomID: "season_pick", Placeholder: "Pick a season…", MinValues: &one, MaxValues: 1, Options: opts},
+		}},
+	}
+	embed := &discordgo.MessageEmbed{Title: "📺 Pick a Season", Description: fmt.Sprintf("Show: **%s**", show), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	_, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: messageID, Channel: channelID, Embeds: &[]*discordgo.MessageEmbed{embed}, Components: &components})
+	return err
+}
+
+func (b *Bot) renderEpisodePicker(s *discordgo.Session, channelID, messageID, userID, show string, season int, page, perPage int) error {
+	b.showLock.RLock()
+	flow := b.showFlows[messageID]
+	b.showLock.RUnlock()
+	if flow == nil { return fmt.Errorf("no flow") }
+	episodes := flow.Data[show][season]
+	total := len(episodes)
+	if perPage <= 0 { perPage = 25 }
+	pages := (total + perPage - 1) / perPage
+	if pages == 0 { pages = 1 }
+	if page < 0 { page = 0 }
+	if page >= pages { page = pages - 1 }
+	start := page * perPage
+	end := start + perPage
+	if end > total { end = total }
+	opts := make([]discordgo.SelectMenuOption, 0, end-start)
+	for i := start; i < end; i++ {
+		ep := episodes[i]
+		label := fmt.Sprintf("S%02dE%02d — %s", season, ep.Episode, ep.EpisodeTitle)
+		if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
+		opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: strconv.Itoa(i)})
+	}
+	one := 1
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.SelectMenu{CustomID: "episode_pick", Placeholder: "Pick an episode…", MinValues: &one, MaxValues: 1, Options: opts},
+		}},
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{Style: discordgo.SecondaryButton, Label: "Prev", CustomID: "ep_prev", Disabled: page == 0},
+			discordgo.Button{Style: discordgo.SecondaryButton, Label: "Next", CustomID: "ep_next", Disabled: page >= pages-1},
+		}},
+	}
+	embed := &discordgo.MessageEmbed{Title: "📺 Pick an Episode", Description: fmt.Sprintf("Show: **%s** — Season %d — Page %d/%d", show, season, page+1, pages), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	_, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: messageID, Channel: channelID, Embeds: &[]*discordgo.MessageEmbed{embed}, Components: &components})
+	return err
 }
 
 // messageCreate is the handler for new messages
@@ -192,8 +318,10 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	switch command {
 	case "link":
 		b.handleLink(s, m, args)
-	case "vod":
-		b.handleVOD(s, m, args)
+	case "movie":
+		b.handleMovie(s, m, args)
+	case "show":
+		b.handleShow(s, m, args)
 	case "status":
 		b.handleStatus(s, m, args)
 	case "disconnect":
@@ -203,7 +331,7 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	case "help":
 		b.handleHelp(s, m)
 	default:
-		utils.DebugLog("Discord: unknown command '%s'", command)
+		b.handleHelp(s, m)
 	}
 }
 
@@ -253,141 +381,6 @@ func (b *Bot) handleLink(s *discordgo.Session, m *discordgo.MessageCreate, args 
 		"✅ Linked Successfully",
 		fmt.Sprintf("Your Discord account is now linked to `%s`.\n\nYou're all set to use other commands.", confirmed),
 	)
-}
-
-// handleVOD handles the !vod command to search for VOD content
-func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	query := strings.TrimSpace(strings.Join(args, " "))
-	if query == "" {
-		b.info(m.ChannelID, "🎬 VOD Search",
-			"Usage: `!vod <search query>`\n\nExample: `!vod the matrix`")
-		return
-	}
-
-	// Resolve LDAP user for this Discord user
-	success, respData, err := b.makeAPIRequest("GET", "/discord/"+m.Author.ID+"/ldap", nil)
-	if err != nil || !success {
-		b.warn(m.ChannelID, "🔗 Linking Required",
-			"Your Discord account is not linked to an IPTV user.\n\nPlease link it first:\n`!link <ldap_username>`")
-		return
-	}
-
-	data, ok := respData.(map[string]interface{})
-	if !ok {
-		b.fail(m.ChannelID, "❌ Unexpected Response",
-			"Failed to process the server response. Please try again later.")
-		return
-	}
-	ldapUser, ok := data["ldap_user"].(string)
-	if !ok || ldapUser == "" {
-		b.warn(m.ChannelID, "🔗 Linking Required",
-			"Your Discord account is not linked to an IPTV user.\n\nPlease link it first:\n`!link <ldap_username>`")
-		return
-	}
-
-	// Search request
-	searchData := map[string]string{
-		"username": ldapUser,
-		"query":    query,
-	}
-	success, respData, err = b.makeAPIRequest("POST", "/vod/search", searchData)
-	if err != nil || !success {
-		msg := "We couldn't complete your search."
-		if err != nil {
-			msg += fmt.Sprintf("\n\nError: `%s`", err.Error())
-		}
-		b.fail(m.ChannelID, "❌ Search Failed", msg)
-		return
-	}
-
-	data, ok = respData.(map[string]interface{})
-	if !ok {
-		b.fail(m.ChannelID, "❌ Unexpected Response",
-			"Failed to process the search results. Please try again later.")
-		return
-	}
-
-	resultsData, ok := data["results"].([]interface{})
-	if !ok || len(resultsData) == 0 {
-		b.info(m.ChannelID, "🔎 No Results",
-			fmt.Sprintf("No results found for `%s`.\nTry a different title or spelling.", query))
-		return
-	}
-
-	// Convert and render up to 10 results
-	var results []types.VODResult
-	for _, result := range resultsData {
-		if len(results) >= 10 {
-			break
-		}
-		if resultMap, ok := result.(map[string]interface{}); ok {
-			results = append(results, types.VODResult{
-				ID:       getString(resultMap, "ID"),
-				Title:    getString(resultMap, "Title"),
-				Category: getString(resultMap, "Category"),
-				Duration: getString(resultMap, "Duration"),
-				Year:     getString(resultMap, "Year"),
-				Rating:   getString(resultMap, "Rating"),
-				StreamID: getString(resultMap, "StreamID"),
-			})
-		}
-	}
-
-	// Build a polished results embed
-	var list strings.Builder
-	emojis := []string{"1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "0️⃣"}
-	for i, r := range results {
-		num := emojis[i]
-		list.WriteString(fmt.Sprintf("%s  •  **%s** (%s) — %s", num, r.Title, r.Year, r.Category))
-		if r.Rating != "" {
-			list.WriteString(fmt.Sprintf("  |  ⭐ %s", r.Rating))
-		}
-		list.WriteString("\n")
-	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "🎬 VOD Search Results",
-		Description: fmt.Sprintf("Query: `%s`\n\nReact below to pick a number and start the download.", query),
-		Color:       colorInfo,
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Results",
-				Value:  list.String(),
-				Inline: false,
-			},
-		},
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-
-	msg, err := s.ChannelMessageSendEmbed(m.ChannelID, embed)
-	if err != nil {
-		utils.ErrorLog("Discord: failed to send VOD results embed: %v", err)
-		return
-	}
-
-	// Map choices 1..N (10th is 0)
-	choiceMap := make(map[int]types.VODResult, len(results))
-	for i, r := range results {
-		choiceMap[i+1] = r
-	}
-
-	b.pendingMsgLock.Lock()
-	b.pendingVODByMsg[msg.ID] = &vodPendingContext{
-		UserID:    m.Author.ID,
-		ChannelID: m.ChannelID,
-		Choices:   choiceMap,
-	}
-	b.pendingMsgLock.Unlock()
-
-	limit := len(results)
-	if limit > 10 {
-		limit = 10
-	}
-	for i := 0; i < limit; i++ {
-		if err := s.MessageReactionAdd(msg.ChannelID, msg.ID, emojis[i]); err != nil {
-			utils.WarnLog("Discord: failed to add reaction %s: %v", emojis[i], err)
-		}
-	}
 }
 
 // Reaction handler: user picks a result by reacting with a digit
@@ -461,6 +454,7 @@ func (b *Bot) startVODDownloadFromSelection(s *discordgo.Session, channelID, use
 		"username":  ldapUser,
 		"stream_id": selectedVOD.StreamID,
 		"title":     selectedVOD.Title,
+		"type":      selectedVOD.StreamType,
 	}
 	success, respData, err = b.makeAPIRequest("POST", "/vod/download", downloadData)
 	if err != nil || !success {
@@ -496,19 +490,181 @@ func (b *Bot) startVODDownloadFromSelection(s *discordgo.Session, channelID, use
 		expirationInfo = fmt.Sprintf("\nThis link will expire after %s", expiry)
 	}
 
-	// Send polished success embed
-	desc := fmt.Sprintf("**%s**\n\nYour download is ready.", selectedVOD.Title)
+	// Build a prettier success embed with a link button
+	titleText := selectedVOD.Title
+	if selectedVOD.SeriesTitle != "" && selectedVOD.Episode > 0 {
+		// Prefer series formatting when available
+		titleText = fmt.Sprintf("%s — S%02dE%02d %s", selectedVOD.SeriesTitle, selectedVOD.Season, selectedVOD.Episode, selectedVOD.EpisodeTitle)
+	}
+
+	desc := "Your download is ready."
 	if expirationInfo != "" {
 		desc += "\n" + expirationInfo
 	}
-	fields := []*discordgo.MessageEmbedField{
-		{
-			Name:   "Download Link",
-			Value:  fmt.Sprintf("[Click here to download](%s)", downloadURL),
-			Inline: false,
-		},
+
+	fields := []*discordgo.MessageEmbedField{}
+	if selectedVOD.Year != "" {
+		fields = append(fields, &discordgo.MessageEmbedField{Name: "Year", Value: selectedVOD.Year, Inline: true})
 	}
-	b.success(channelID, "✅ Download Ready", desc, fields...)
+	if selectedVOD.Rating != "" {
+		fields = append(fields, &discordgo.MessageEmbedField{Name: "Rating", Value: "⭐ " + selectedVOD.Rating, Inline: true})
+	}
+	if selectedVOD.Size != "" {
+		fields = append(fields, &discordgo.MessageEmbedField{Name: "Size", Value: selectedVOD.Size, Inline: true})
+	}
+	if selectedVOD.Duration != "" {
+		fields = append(fields, &discordgo.MessageEmbedField{Name: "Duration", Value: selectedVOD.Duration, Inline: true})
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "✅ Download Ready — " + titleText,
+		Description: desc,
+		Color:       colorSuccess,
+		Fields:      fields,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+	}
+
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{Style: discordgo.LinkButton, Label: "Open Download", URL: downloadURL},
+		}},
+	}
+
+	if _, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}, Components: components}); err != nil {
+		utils.ErrorLog("Discord: failed to send download embed: %v", err)
+		// Fallback to plain embed without button
+		b.success(channelID, "✅ Download Ready", desc, &discordgo.MessageEmbedField{Name: "Download Link", Value: fmt.Sprintf("[Click here to download](%s)", downloadURL)})
+	}
+}
+
+// Handle component interactions
+func (b *Bot) handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Only handle component interactions
+	if i.Type != discordgo.InteractionMessageComponent {
+		return
+	}
+
+	msgID := i.Message.ID
+	customID := i.MessageComponentData().CustomID
+	switch customID {
+	case "vod_prev":
+		b.selectLock.RLock(); ctx, ok := b.pendingVODSelect[msgID]; b.selectLock.RUnlock(); if !ok { return }
+		if !b.isSameUser(ctx.UserID, i) { return }
+		ctx.Page--
+		if ctx.Page < 0 { ctx.Page = 0 }
+		if err := b.updateVODInteractiveMessage(s, msgID, ctx); err != nil {
+			utils.WarnLog("Discord: failed to update VOD message (prev): %v", err)
+		}
+		// Acknowledge with a deferred update to remove the loading state
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate})
+	case "vod_next":
+		b.selectLock.RLock(); ctx, ok := b.pendingVODSelect[msgID]; b.selectLock.RUnlock(); if !ok { return }
+		if !b.isSameUser(ctx.UserID, i) { return }
+		ctx.Page++
+		if err := b.updateVODInteractiveMessage(s, msgID, ctx); err != nil {
+			utils.WarnLog("Discord: failed to update VOD message (next): %v", err)
+		}
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate})
+	case "vod_select":
+		b.selectLock.RLock(); ctx, ok := b.pendingVODSelect[msgID]; b.selectLock.RUnlock(); if !ok { return }
+		if !b.isSameUser(ctx.UserID, i) { return }
+		data := i.MessageComponentData()
+		if len(data.Values) == 0 {
+			return
+		}
+		idx, err := strconv.Atoi(data.Values[0])
+		if err != nil || idx < 0 || idx >= len(ctx.Results) {
+			return
+		}
+		selected := ctx.Results[idx]
+		// Quickly acknowledge interaction with an ephemeral message and then trigger download
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Flags:   discordgo.MessageFlagsEphemeral,
+				Content: fmt.Sprintf("Starting download for: %s", selected.Title),
+			},
+		})
+		go b.startVODDownloadFromSelection(s, ctx.Channel, ctx.UserID, selected)
+	case "show_pick":
+		// User picked a show; render season picker
+		userID := b.interactionUserID(i)
+		if userID == "" { return }
+		data := i.MessageComponentData()
+		if len(data.Values) == 0 { return }
+		show := data.Values[0]
+		// Initialize state
+		b.showLock.Lock()
+		b.showState[msgID] = &showState{UserID: userID, SelectedShow: show, SelectedSeason: 0, EpisodePage: 0, PerPage: 25}
+		b.showLock.Unlock()
+		if err := b.renderSeasonPicker(s, i.ChannelID, msgID, userID, show); err != nil {
+			utils.WarnLog("Discord: failed to render season picker: %v", err)
+		}
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate})
+	case "season_pick":
+		userID := b.interactionUserID(i)
+		if userID == "" { return }
+		data := i.MessageComponentData()
+		if len(data.Values) == 0 { return }
+		season, _ := strconv.Atoi(data.Values[0])
+		b.showLock.Lock()
+		st := b.showState[msgID]
+		if st == nil { st = &showState{UserID: userID, PerPage: 25}; b.showState[msgID] = st }
+		// Only allow same user
+		if st.UserID != userID { b.showLock.Unlock(); return }
+		st.SelectedSeason = season
+		st.EpisodePage = 0
+		show := st.SelectedShow
+		b.showLock.Unlock()
+		if err := b.renderEpisodePicker(s, i.ChannelID, msgID, userID, show, season, 0, 25); err != nil {
+			utils.WarnLog("Discord: failed to render episode picker: %v", err)
+		}
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate})
+	case "ep_prev", "ep_next":
+		userID := b.interactionUserID(i)
+		if userID == "" { return }
+		b.showLock.Lock()
+		st := b.showState[msgID]
+		b.showLock.Unlock()
+		if st == nil || st.UserID != userID { return }
+		delta := 0
+		if customID == "ep_prev" { delta = -1 } else { delta = 1 }
+		b.showLock.Lock(); st.EpisodePage += delta; page := st.EpisodePage; season := st.SelectedSeason; show := st.SelectedShow; b.showLock.Unlock()
+		if err := b.renderEpisodePicker(s, i.ChannelID, msgID, userID, show, season, page, 25); err != nil {
+			utils.WarnLog("Discord: failed to update episode page: %v", err)
+		}
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate})
+	case "episode_pick":
+		userID := b.interactionUserID(i)
+		if userID == "" { return }
+		b.showLock.RLock()
+		st := b.showState[msgID]
+		flow := b.showFlows[msgID]
+		b.showLock.RUnlock()
+		if st == nil || flow == nil || st.UserID != userID { return }
+		data := i.MessageComponentData()
+		if len(data.Values) == 0 { return }
+		idxWithinPage, _ := strconv.Atoi(data.Values[0])
+		page := st.EpisodePage
+		start := page * 25
+		episodes := flow.Data[st.SelectedShow][st.SelectedSeason]
+		if start+idxWithinPage < 0 || start+idxWithinPage >= len(episodes) { return }
+		selected := episodes[start+idxWithinPage]
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: fmt.Sprintf("Starting download for: %s S%02dE%02d — %s", st.SelectedShow, st.SelectedSeason, selected.Episode, selected.EpisodeTitle)}})
+		go b.startVODDownloadFromSelection(s, i.ChannelID, userID, selected)
+	}
+}
+
+func (b *Bot) isSameUser(expected string, i *discordgo.InteractionCreate) bool {
+	if i.Member != nil && i.Member.User != nil { return i.Member.User.ID == expected }
+	if i.User != nil { return i.User.ID == expected }
+	return false
+}
+
+func (b *Bot) interactionUserID(i *discordgo.InteractionCreate) string {
+	if i.Member != nil && i.Member.User != nil { return i.Member.User.ID }
+	if i.User != nil { return i.User.ID }
+	return ""
 }
 
 // handleStatus shows the current streams and users
@@ -635,7 +791,8 @@ func (b *Bot) handleHelp(s *discordgo.Session, m *discordgo.MessageCreate) {
 	var cmd strings.Builder
 	cmd.WriteString("**User Commands**\n")
 	cmd.WriteString("• `!link <ldap_username>` — Link your Discord account.\n")
-	cmd.WriteString("• `!vod <query>` — Search VOD; react 0–9 to choose.\n")
+	cmd.WriteString("• `!movie <title>` — Search movies; use the dropdown to pick.\n")
+	cmd.WriteString("• `!show <series>` — Pick a show, then season and episode easily.\n")
 	cmd.WriteString("• `!status` — Show active streams and users.\n")
 	cmd.WriteString("• `!help` — Show this help.\n\n")
 

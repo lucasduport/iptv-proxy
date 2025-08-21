@@ -20,6 +20,7 @@
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,12 +28,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
+	xtreamcodes "github.com/tellytv/go.xtream-codes"
 )
 
 var vodM3UMu sync.Mutex
@@ -57,6 +60,65 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 	results, err := searchVODInM3UFile(m3uPath, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search VOD in M3U: %w", err)
+	}
+
+	// Also search series (flatten episodes) using Xtream API for better episode discovery
+	seriesResults, err := c.searchXtreamSeries(query)
+	if err == nil && len(seriesResults) > 0 {
+		results = append(results, seriesResults...)
+	}
+
+	// Best-effort: probe size for first few results to display in Discord
+	// Avoid hammering provider: limit to 10 probes with small timeout
+	maxProbe := 10
+	if len(results) < maxProbe {
+		maxProbe = len(results)
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	for i := 0; i < maxProbe; i++ {
+		streamID := results[i].StreamID
+		if streamID == "" {
+			continue
+		}
+		// Build Xtream URL by type
+		typ := results[i].StreamType
+		if typ == "" {
+			typ = "movie"
+		}
+		basePath := "movie"
+		if typ == "series" {
+			basePath = "series"
+		}
+		vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, streamID)
+		// Try HEAD first
+		req, _ := http.NewRequest("HEAD", vodURL, nil)
+		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+		if resp, err := client.Do(req); err == nil {
+			resp.Body.Close()
+			if cl := resp.Header.Get("Content-Length"); cl != "" {
+				if sz, perr := parseInt64(cl); perr == nil && sz > 0 {
+					results[i].SizeBytes = sz
+					results[i].Size = utils.HumanBytes(sz)
+					continue
+				}
+			}
+		}
+		// Fallback: range request to get Content-Range
+		req, _ = http.NewRequest("GET", vodURL, nil)
+		req.Header.Set("Range", "bytes=0-0")
+		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+		if resp, err := client.Do(req); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if cr := resp.Header.Get("Content-Range"); cr != "" {
+				if total := strings.TrimSpace(cr[strings.LastIndex(cr, "/")+1:]); total != "*" {
+					if sz, perr := parseInt64(total); perr == nil && sz > 0 {
+						results[i].SizeBytes = sz
+						results[i].Size = utils.HumanBytes(sz)
+					}
+				}
+			}
+		}
 	}
 
 	utils.DebugLog("VOD search returned %d results for query: %s", len(results), query)
@@ -197,6 +259,9 @@ func searchVODInM3UFile(m3uPath string, query string) ([]types.VODResult, error)
 				Year:     "",
 				Rating:   "",
 				StreamID: streamID,
+				StreamType: "movie",
+				SizeBytes: 0,
+				Size:      "",
 			})
 
 			// Reset lastEXTINF after pairing with URL
@@ -210,4 +275,83 @@ func searchVODInM3UFile(m3uPath string, query string) ([]types.VODResult, error)
 		return nil, err
 	}
 	return results, nil
+}
+
+// parseInt64 converts string to int64, ignoring commas/spaces
+func parseInt64(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	// Remove thousands separators if any
+	s = strings.ReplaceAll(s, ",", "")
+	var n int64
+	var err error
+	// fast path
+	n, err = strconv.ParseInt(s, 10, 64)
+	return n, err
+}
+
+// searchXtreamSeries searches series and flattens episodes matching the query
+func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil, nil
+	}
+	// Initialize Xtream client
+	client, err := xtreamcodes.NewClientWithUserAgent(
+		context.Background(), c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, utils.GetIPTVUserAgent(),
+	)
+	if err != nil {
+		utils.WarnLog("Series search: failed to init Xtream client: %v", err)
+		return nil, err
+	}
+	// Get all series; filter by name first
+	series, err := client.GetSeries("")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]types.VODResult, 0, 50)
+	for _, s := range series {
+		seriesName := s.Name
+		if seriesName == "" {
+			continue
+		}
+		// simple filter: if query not in series name, skip
+		if !strings.Contains(strings.ToLower(seriesName), q) {
+			continue
+		}
+		// Fetch per-series info to get episodes
+		si, err := client.GetSeriesInfo(fmt.Sprintf("%d", s.SeriesID))
+		if err != nil {
+			continue
+		}
+		// Flatten episodes
+		for seasonStr, eps := range si.Episodes {
+			seasonNum, _ := strconv.Atoi(seasonStr)
+			for _, ep := range eps {
+				title := ep.Title
+				// Accept matches on episode title as well
+				if !strings.Contains(strings.ToLower(title), q) && !strings.Contains(strings.ToLower(seriesName), q) {
+					continue
+				}
+				streamID := ep.ID
+				out = append(out, types.VODResult{
+					ID:          streamID,
+					Title:       fmt.Sprintf("%s S%02dE%02d — %s", seriesName, seasonNum, int(ep.EpisodeNum), title),
+					Category:    s.Genre,
+					Duration:    ep.Info.Duration,
+					Year:        s.ReleaseDate,
+					Rating:      fmt.Sprintf("%v", float64(ep.Info.Rating)),
+					StreamID:    streamID,
+					StreamType:  "series",
+					SeriesTitle: seriesName,
+					Season:      seasonNum,
+					Episode:     int(ep.EpisodeNum),
+					EpisodeTitle: title,
+				})
+				if len(out) >= 50 {
+					return out, nil
+				}
+			}
+		}
+	}
+	return out, nil
 }

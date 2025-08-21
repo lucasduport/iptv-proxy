@@ -16,9 +16,12 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
  
- package utils
+package utils
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // MaskString masks sensitive parts of strings for logging.
 func MaskString(s string) string {
@@ -41,4 +44,22 @@ func MaskURL(urlStr string) string {
 		parts[4] = MaskString(parts[4]) // Username
 	}
 	return strings.Join(parts, "/")
+}
+
+// HumanBytes formats a byte count into a short, human-friendly string (e.g., 1.2 GB)
+func HumanBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	pre := []string{"KB", "MB", "GB", "TB", "PB", "EB"}
+	if exp >= len(pre) {
+		exp = len(pre) - 1
+	}
+	return fmt.Sprintf("%.1f %s", float64(b)/float64(div), pre[exp])
 }

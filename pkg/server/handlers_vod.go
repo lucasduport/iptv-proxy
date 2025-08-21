@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -111,6 +112,7 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 		Username string `json:"username"`
 		StreamID string `json:"stream_id"`
 		Title    string `json:"title"`
+		Type     string `json:"type"` // movie or series
 	}
 
 	if err := ctx.ShouldBindJSON(&req); err != nil {
@@ -159,7 +161,14 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 	}
 
 	// Generate a download URL for the VOD content
-	vodURL := fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, req.StreamID)
+	basePath := "movie"
+	if strings.ToLower(req.Type) == "series" {
+		basePath = "series"
+	}
+	// Many Xtream providers require an explicit container extension for VOD/series
+	// Default to .mp4 which is widely supported
+	ext := ".mp4"
+	vodURL := fmt.Sprintf("%s/%s/%s/%s/%s%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, req.StreamID, ext)
 	utils.DebugLog("API: VOD URL created: %s", utils.MaskURL(vodURL))
 
 	// Generate a temporary download token
@@ -178,7 +187,7 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 	if c.ProxyConfig.HTTPS {
 		protocol = "https"
 	}
-	downloadURL := fmt.Sprintf("%s://%s:%d/download/%s", protocol, c.HostConfig.Hostname, c.AdvertisedPort, token)
+	downloadURL := fmt.Sprintf("%s://%s/download/%s", protocol, c.HostConfig.Hostname, token)
 
 	utils.InfoLog("Created VOD download link for user %s, title: %s, token: %s", req.Username, req.Title, token)
 

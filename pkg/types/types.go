@@ -103,6 +103,16 @@ type VODResult struct {
 	Year     string
 	Rating   string
 	StreamID string // The stream ID needed to retrieve this content
+	// Optional size information (in bytes and human-friendly)
+	SizeBytes int64
+	Size      string
+	// Type of result: "movie" or "series"
+	StreamType string
+	// Series metadata when StreamType is "series"
+	SeriesTitle   string
+	Season        int
+	Episode       int
+	EpisodeTitle  string
 }
 
 // TemporaryLink represents a generated temporary download link

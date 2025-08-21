@@ -390,8 +390,9 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	// Add appropriate headers for download
 	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.mp4"`, tempLink.Title))
 
-	// Stream the content to the client
-	c.multiplexedStream(ctx, targetURL)
+	// For downloads, use direct proxy to preserve Content-Length and allow
+	// browser to show accurate remaining time instead of "Unknown time left".
+	c.stream(ctx, targetURL)
 }
 
 // multiplexedStream handles streaming with connection multiplexing
