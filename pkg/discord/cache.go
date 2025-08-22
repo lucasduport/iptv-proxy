@@ -64,6 +64,7 @@ func (b *Bot) handleCache(s *discordgo.Session, m *discordgo.MessageCreate, args
     if err != nil || !ok { _ = editEmbed(s, loading, colorError, "❌ Search Failed", "Could not complete search."); return }
     dmap, _ := resp.(map[string]interface{})
     arr, _ := dmap["results"].([]interface{})
+    utils.DebugLog("Discord: Cache search API returned %d results for %q", len(arr), query)
     if len(arr) == 0 { _ = editEmbed(s, loading, colorInfo, "🔎 No Results", fmt.Sprintf("No results for `%s`.", query)); return }
 
     // Convert to VODResult list (preserve both movies and series)
@@ -88,32 +89,42 @@ func (b *Bot) handleCache(s *discordgo.Session, m *discordgo.MessageCreate, args
         }
     }
 
-    // Build options for select (first page only, then paginate if >25)
-    ctx := &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: fmt.Sprintf("cache:%s (for %dd)", query, days), Results: results, Page: 0, PerPage: 25, Created: time.Now()}
-    // Replace loading message
-    total := len(results); pages := (total+ctx.PerPage-1)/ctx.PerPage; if pages==0{pages=1}
-    start := 0; end := ctx.PerPage; if end>total{end=total}
+    // Optional client-side filtering to improve matching like "... s02e04"
+    tokens, fSeason, fEpisode := parseQueryFilters(query)
+    if len(tokens) > 0 { results = filterVODResults(results, tokens, fSeason, fEpisode) }
+    utils.DebugLog("Discord: Cache results after filter: %d", len(results))
+    if len(results) == 0 {
+        _ = editEmbed(s, loading, colorInfo, "🔎 No Results", fmt.Sprintf("No results matched `%s`. Try removing season/episode or using a shorter query.", query))
+        return
+    }
+
+    // Single dropdown of 25 per page
+    total := len(results)
+    perPage := 25
+    withButtons := total > perPage
+    ctx := &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: fmt.Sprintf("cache:%s (for %dd)", query, days), Results: results, Page: 0, PerPage: perPage, Created: time.Now()}
+    pages := (total+perPage-1)/perPage; if pages==0{pages=1}
+    utils.DebugLog("Discord: Cache rendering %d results perPage=%d pages=%d", total, perPage, pages)
+    start := 0; end := perPage; if end>total{end=total}
+    one := 1
+    components := make([]discordgo.MessageComponent, 0, 2)
     opts := make([]discordgo.SelectMenuOption, 0, end-start)
-    for i:=start;i<end;i++{
+    for i:=start; i<end; i++{
         r := results[i]
         label := r.Title
         if r.StreamType=="series" && r.SeriesTitle!="" && r.Episode>0 { label = fmt.Sprintf("%s S%02dE%02d", r.SeriesTitle, r.Season, r.Episode) }
         if r.Year!="" { label = fmt.Sprintf("%s (%s)", label, r.Year) }
         if len([]rune(label))>100 { label = string([]rune(label)[:97])+"..." }
-        desc := r.Category
-        if r.Size!="" { if desc!="" { desc += " • " }; desc += r.Size }
-        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: strconv.Itoa(i), Description: desc})
+        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: strconv.Itoa(i)})
     }
-    one := 1
-    components := []discordgo.MessageComponent{
-        discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.SelectMenu{CustomID: "vod_select", Placeholder: "Pick to cache…", MinValues: &one, MaxValues: 1, Options: opts} }},
-        discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.Button{Style: discordgo.SecondaryButton, Label: "Prev", CustomID: "vod_prev", Disabled: true}, discordgo.Button{Style: discordgo.SecondaryButton, Label: "Next", CustomID: "vod_next", Disabled: total<=ctx.PerPage} }},
-    }
+    placeholder := "Pick to cache…"; if pages>1 { placeholder = fmt.Sprintf("Pick to cache… (%d/%d)", 1, pages) }
+    components = append(components, discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.SelectMenu{CustomID: "vod_select", Placeholder: placeholder, MinValues: &one, MaxValues: 1, Options: opts} }})
+    if withButtons { components = append(components, discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.Button{Style: discordgo.SecondaryButton, Label: "Prev", CustomID: "vod_prev", Disabled: true}, discordgo.Button{Style: discordgo.SecondaryButton, Label: "Next", CustomID: "vod_next", Disabled: total<=perPage} }}) }
     embed := &discordgo.MessageEmbed{Title: "💾 Cache — Select Item", Description: fmt.Sprintf("%d result(s). Days: %d. Use the dropdown.", total, days), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
     embeds := []*discordgo.MessageEmbed{embed}
     if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: loading.ID, Channel: m.ChannelID, Embeds: &embeds, Components: &components}); err != nil {
         msg, err2 := b.renderVODInteractiveMessage(s, ctx)
-        if err2 != nil { utils.ErrorLog("Discord: cache render failed: %v", err2); _ = editEmbed(s, loading, colorError, "❌ Error", "Couldn't render results."); return }
+        if err2 != nil { utils.ErrorLog("Discord: cache render failed: %v", err2); _ = editEmbed(s, loading, colorWarn, "Too Many Results", fmt.Sprintf("Your search returned %d items, which is too many to display at once. Please refine your query.", total)); return }
         b.selectLock.Lock(); b.pendingVODSelect[msg.ID] = ctx; b.selectLock.Unlock()
     } else {
         b.selectLock.Lock(); b.pendingVODSelect[loading.ID] = ctx; b.selectLock.Unlock()

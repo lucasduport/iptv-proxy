@@ -42,7 +42,7 @@ import (
 
 var vodM3UMu sync.Mutex
 
-// searchXtreamVOD is a helper function to search for VOD content using a cached M3U file
+// searchXtreamVOD searches movies and series using the Xtream API only (no M3U mixing)
 func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 	utils.DebugLog("Searching VOD with query: %s", query)
 
@@ -52,26 +52,29 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 		return nil, fmt.Errorf("xtream configuration is incomplete")
 	}
 
-	// Ensure local cached M3U exists and is fresh
-	m3uPath, err := c.ensureVODM3UCache()
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare VOD M3U cache: %w", err)
+	results := make([]types.VODResult, 0, 50)
+	// Movies via API
+	if movies, err := c.searchXtreamMovies(query); err == nil && len(movies) > 0 {
+		utils.DebugLog("VOD search: movie API results: %d (first: %s)", len(movies), func() string { if len(movies)>0 { return movies[0].Title }; return "" }())
+		results = append(results, movies...)
+	} else if err != nil {
+		utils.WarnLog("VOD search: movie API search error: %v", err)
 	}
-
-	// Search inside the local M3U file for movie entries
-	results, err := searchVODInM3UFile(m3uPath, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to search VOD in M3U: %w", err)
-	}
-
-	// Also search series (flatten episodes) using Xtream API for better episode discovery
-	seriesResults, err := c.searchXtreamSeries(query)
-	if err == nil && len(seriesResults) > 0 {
+	// Series via API
+	if seriesResults, err := c.searchXtreamSeries(query); err == nil && len(seriesResults) > 0 {
+		utils.DebugLog("VOD search: series API results: %d (first: %s)", len(seriesResults), func() string { if len(seriesResults)>0 { return seriesResults[0].Title }; return "" }())
 		results = append(results, seriesResults...)
+	} else if err != nil {
+		utils.WarnLog("VOD search: series API search error: %v", err)
 	}
-	// And scan local M3U for series entries as a fallback (provider APIs can be flaky)
-	if sres, err := searchSeriesInM3UFile(m3uPath, query); err == nil && len(sres) > 0 {
-		results = append(results, sres...)
+
+	// Deduplicate by (StreamType, StreamID), keep the richer entry
+	if len(results) > 1 {
+		before := len(results)
+		results = dedupeVODResults(results)
+		if len(results) != before {
+			utils.DebugLog("VOD search: deduplicated results: %d -> %d", before, len(results))
+		}
 	}
 
 	// Best-effort: probe size for first few results to display in Discord
@@ -120,6 +123,98 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 	sort.SliceStable(results, func(i, j int) bool { return strings.ToLower(results[i].Title) < strings.ToLower(results[j].Title) })
 	utils.DebugLog("VOD search returned %d results for query: %s", len(results), query)
 	return results, nil
+}
+
+// searchXtreamMovies queries the Xtream API for VOD movies and filters by tokens.
+func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
+	q := strings.TrimSpace(query)
+	if q == "" { return nil, nil }
+	tokens, _, _ := parseQueryTokens(q) // season/episode tokens ignored for movies
+	utils.DebugLog("Movies search: using Xtream client (baseURL=%s, user=%s)", c.XtreamBaseURL, utils.MaskString(c.XtreamUser.String()))
+	cli, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, utils.GetIPTVUserAgent())
+	if err != nil { return nil, err }
+	resp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_vod_streams", url.Values{})
+	if err != nil {
+		utils.WarnLog("Movies search: get_vod_streams failed (HTTP %d, CT=%s): %v", httpcode, contentType, err)
+		return nil, err
+	}
+	arr, ok := resp.([]interface{})
+	if !ok { return nil, fmt.Errorf("unexpected get_vod_streams format: %T", resp) }
+	out := make([]types.VODResult, 0, 50)
+	for _, it := range arr {
+		m, ok := it.(map[string]interface{})
+		if !ok { continue }
+		name := fmt.Sprintf("%v", m["name"]) // movie title
+		if name == "" { continue }
+		if !allTokensIn(tokens, name) { continue }
+		streamID := fmt.Sprintf("%v", m["stream_id"]) // numeric as string
+		if strings.TrimSpace(streamID) == "" || streamID == "<nil>" { continue }
+		year := fmt.Sprintf("%v", firstNonEmpty(m["releaseDate"], m["release_date"]))
+		rating := fmt.Sprintf("%v", firstNonEmpty(m["rating"], m["vote_average"]))
+		duration := fmt.Sprintf("%v", m["duration"]) // may be empty
+		category := fmt.Sprintf("%v", m["category_name"]) // best-effort; some providers only give category_id
+
+		out = append(out, types.VODResult{
+			ID:         streamID,
+			Title:      name,
+			Category:   category,
+			Duration:   duration,
+			Year:       year,
+			Rating:     rating,
+			StreamID:   streamID,
+			StreamType: "movie",
+		})
+		if len(out) >= 50 { break }
+	}
+	utils.DebugLog("Movies search: returning %d results", len(out))
+	return out, nil
+}
+
+// dedupeVODResults removes duplicates with the same (StreamType, StreamID), keeping the richer entry.
+func dedupeVODResults(in []types.VODResult) []types.VODResult {
+	type key struct{ typ, id string }
+	best := make(map[key]types.VODResult, len(in))
+	order := make([]key, 0, len(in))
+	for _, r := range in {
+		k := key{typ: strings.ToLower(r.StreamType), id: r.StreamID}
+		if k.id == "" { // fallback key on Title to avoid total collapse when provider omits ids
+			k = key{typ: strings.ToLower(r.StreamType), id: strings.ToLower(r.Title)}
+		}
+		if cur, ok := best[k]; ok {
+			if isRicher(r, cur) {
+				best[k] = r
+			}
+		} else {
+			best[k] = r
+			order = append(order, k)
+		}
+	}
+	out := make([]types.VODResult, 0, len(best))
+	for _, k := range order { out = append(out, best[k]) }
+	return out
+}
+
+// isRicher decides whether a has more useful metadata than b.
+func isRicher(a, b types.VODResult) bool {
+	// Prefer entries with episode context
+	if (a.SeriesTitle != "" && a.Episode > 0) != (b.SeriesTitle != "" && b.Episode > 0) {
+		return a.SeriesTitle != "" && a.Episode > 0
+	}
+	// Prefer explicit EpisodeTitle
+	if (a.EpisodeTitle != "") != (b.EpisodeTitle != "") { return a.EpisodeTitle != "" }
+	// Prefer having rating
+	if (a.Rating != "") != (b.Rating != "") { return a.Rating != "" }
+	// Prefer having size info
+	if (a.SizeBytes > 0) != (b.SizeBytes > 0) { return a.SizeBytes > 0 }
+	if (a.Size != "") != (b.Size != "") { return a.Size != "" }
+	// Prefer having duration
+	if (a.Duration != "") != (b.Duration != "") { return a.Duration != "" }
+	// Prefer year
+	if (a.Year != "") != (b.Year != "") { return a.Year != "" }
+	// Prefer longer title (likely includes episode name)
+	if len(a.Title) != len(b.Title) { return len(a.Title) > len(b.Title) }
+	// Otherwise keep current
+	return false
 }
 
 func (c *Config) ensureVODM3UCache() (string, error) {
@@ -297,6 +392,44 @@ func simpleAllWordsContains(query, text string) bool {
 	return true
 }
 
+// parseQueryTokens splits the query into tokens and extracts optional s/e (e.g., s02e04, s2e4, or separate s02 e04).
+// Returns lowercase tokens and season/episode numbers (0 if missing). Season/Episode tokens are removed from tokens.
+func parseQueryTokens(q string) (tokens []string, season, episode int) {
+	s := strings.TrimSpace(strings.ToLower(q))
+	if s == "" { return nil, 0, 0 }
+	// Find sXXeYY combined
+	if m := regexp.MustCompile(`\bs(\d{1,2})e(\d{1,2})\b`).FindStringSubmatch(s); m != nil {
+		if v, err := strconv.Atoi(m[1]); err == nil { season = v }
+		if v, err := strconv.Atoi(m[2]); err == nil { episode = v }
+		s = strings.ReplaceAll(s, m[0], " ")
+	}
+	// Separate sXX and eYY
+	if season == 0 {
+		if m := regexp.MustCompile(`\bs(\d{1,2})\b`).FindStringSubmatch(s); m != nil {
+			if v, err := strconv.Atoi(m[1]); err == nil { season = v }
+			s = strings.ReplaceAll(s, m[0], " ")
+		}
+	}
+	if episode == 0 {
+		if m := regexp.MustCompile(`\be(\d{1,2})\b`).FindStringSubmatch(s); m != nil {
+			if v, err := strconv.Atoi(m[1]); err == nil { episode = v }
+			s = strings.ReplaceAll(s, m[0], " ")
+		}
+	}
+	tokens = strings.Fields(s)
+	return tokens, season, episode
+}
+
+// allTokensIn checks that all tokens are contained in the haystack string (case-insensitive).
+func allTokensIn(tokens []string, hay string) bool {
+	if len(tokens) == 0 { return true }
+	h := strings.ToLower(hay)
+	for _, t := range tokens {
+		if !strings.Contains(h, t) { return false }
+	}
+	return true
+}
+
 
 // searchSeriesInM3UFile scans the cached M3U and returns episodic entries as series results.
 func searchSeriesInM3UFile(m3uPath string, query string) ([]types.VODResult, error) {
@@ -305,6 +438,7 @@ func searchSeriesInM3UFile(m3uPath string, query string) ([]types.VODResult, err
 	defer f.Close()
 
 	q := strings.TrimSpace(query)
+	qTokens, qSeason, qEpisode := parseQueryTokens(q)
 	sc := bufio.NewScanner(f)
 	lastEXTINF := ""
 	results := make([]types.VODResult, 0, 50)
@@ -329,13 +463,16 @@ func searchSeriesInM3UFile(m3uPath string, query string) ([]types.VODResult, err
 				if pos := strings.Index(attrs, key); pos != -1 { start := pos + len(key); if end := strings.Index(attrs[start:], `"`); end != -1 { category = attrs[start:start+end] } }
 			}
 			if title == "" { title = path.Base(u.Path) }
-			if q != "" && !simpleAllWordsContains(q, title) { lastEXTINF = ""; continue }
+			// Token-based match: require all non-season tokens; enforce numeric season/episode if specified
+			if len(qTokens) > 0 && !allTokensIn(qTokens, title) { lastEXTINF = ""; continue }
 			// Extract S/E
 			season, episode := 0, 0
 			if m := reSE.FindStringSubmatch(title); m != nil {
 				season, _ = strconv.Atoi(m[1])
 				episode, _ = strconv.Atoi(m[2])
 			}
+			if qSeason > 0 && season > 0 && season != qSeason { lastEXTINF = ""; continue }
+			if qEpisode > 0 && episode > 0 && episode != qEpisode { lastEXTINF = ""; continue }
 			seriesTitle := title
 			if i := reSE.FindStringIndex(seriesTitle); i != nil { seriesTitle = strings.TrimSpace(strings.Trim(seriesTitle[:i[0]], "-—–:|• ")) }
 			// StreamID is the last path segment
@@ -367,6 +504,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 	if q == "" {
 		return nil, nil
 	}
+	qTokens, qSeason, qEpisode := parseQueryTokens(q)
 	// Use resilient client to avoid FlexInt unmarshaling issues
 	utils.DebugLog("Series search: using resilient Xtream client (baseURL=%s, user=%s)", c.XtreamBaseURL, utils.MaskString(c.XtreamUser.String()))
 	cli, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, utils.GetIPTVUserAgent())
@@ -393,13 +531,12 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		if !ok {
 			continue
 		}
-		seriesName := fmt.Sprintf("%v", m["name"]) 
+		seriesName := fmt.Sprintf("%v", m["name"])
 		if seriesName == "" {
 			continue
 		}
-	if !simpleAllWordsContains(q, seriesName) {
-			continue
-		}
+		// Only require non-season tokens to be in the series name
+		if !allTokensIn(qTokens, seriesName) { continue }
 		seriesID := fmt.Sprintf("%v", m["series_id"])
 		if seriesID == "" || seriesID == "<nil>" {
 			continue
@@ -407,6 +544,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		genre := fmt.Sprintf("%v", m["genre"]) // may be empty
 		year := fmt.Sprintf("%v", firstNonEmpty(m["releaseDate"], m["release_date"]))
 
+		utils.DebugLog("Series search: candidate '%s' (id=%s, genre=%s, year=%s)", seriesName, seriesID, genre, year)
 		utils.DebugLog("Series search: fetching series info for '%s' (series_id=%s)", seriesName, seriesID)
 		infoResp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_series_info", url.Values{"series_id": {seriesID}})
 		if err != nil {
@@ -423,7 +561,8 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 			// Some providers use episodes as array with season inside
 			continue
 		}
-		for seasonStr, epsV := range epsBySeason {
+	totalEps := 0
+	for seasonStr, epsV := range epsBySeason {
 			seasonNum, _ := strconv.Atoi(seasonStr)
 			eps, ok := epsV.([]interface{})
 			if !ok {
@@ -435,14 +574,16 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 					continue
 				}
 				title := fmt.Sprintf("%v", em["title"])
-				if !simpleAllWordsContains(q, title) && !simpleAllWordsContains(q, seriesName) {
-					continue
-				}
+				// Apply token AND match on either episode title or series name
+				if len(qTokens) > 0 && !(allTokensIn(qTokens, title) || allTokensIn(qTokens, seriesName)) { continue }
 				streamID := fmt.Sprintf("%v", firstNonEmpty(em["id"], em["stream_id"]))
 				if streamID == "" || streamID == "<nil>" {
 					continue
 				}
 				epNum := toInt(em["episode_num"]) // best-effort
+				// Enforce numeric season/episode if specified
+				if qSeason > 0 && seasonNum != qSeason { continue }
+				if qEpisode > 0 && epNum != qEpisode { continue }
 				// info subobject for duration/rating
 				var duration, rating string
 				if infoSub, ok := em["info"].(map[string]interface{}); ok {
@@ -450,7 +591,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 					rating = fmt.Sprintf("%v", firstNonEmpty(infoSub["rating"], infoSub["vote_average"]))
 				}
 
-				out = append(out, types.VODResult{
+		out = append(out, types.VODResult{
 					ID:           streamID,
 					Title:        fmt.Sprintf("%s S%02dE%02d — %s", seriesName, seasonNum, epNum, title),
 					Category:     genre,
@@ -464,11 +605,13 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 					Episode:      epNum,
 					EpisodeTitle: title,
 				})
+		totalEps++
 				if len(out) >= 50 {
 					return out, nil
 				}
 			}
 		}
+	utils.DebugLog("Series search: '%s' yielded %d episode entries after filtering", seriesName, totalEps)
 	}
 	utils.DebugLog("Series search: returning %d results", len(out))
 	return out, nil

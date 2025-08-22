@@ -119,20 +119,13 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 		adminRoleID:     adminRoleID,
 		apiURL:          strings.TrimSuffix(apiURL, "/"),
 		apiKey:          apiKey,
-		pendingVODLinks: make(map[string]map[int]types.VODResult),
-		linkTokens:      make(map[string]string),
 		cleanupInterval: 30 * time.Minute,
 		client:          &http.Client{Timeout: 10 * time.Second},
-		pendingVODByMsg:  make(map[string]*vodPendingContext),
 		pendingVODSelect: make(map[string]*vodSelectContext),
-		showFlows:        make(map[string]*showHierarchy),
-		showState:        make(map[string]*showState),
 	}
 
 	// Register handlers
 	dg.AddHandler(bot.messageCreate)
-	// Handle reactions for selection
-	dg.AddHandler(bot.messageReactionAdd)
 	// Handle interactions (components)
 	dg.AddHandler(bot.handleInteractionCreate)
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
@@ -146,13 +139,11 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 		utils.WarnLog("Ensure 'MESSAGE CONTENT INTENT' is enabled in the Developer Portal.")
 	})
 
-	// Intents: messages, DMs, message content and reactions
+	// Intents: messages, DMs, message content
 	dg.Identify.Intents = discordgo.IntentGuilds |
 		discordgo.IntentGuildMessages |
 		discordgo.IntentDirectMessages |
-		discordgo.IntentMessageContent |
-		discordgo.IntentGuildMessageReactions |
-		discordgo.IntentDirectMessageReactions
+		discordgo.IntentMessageContent
 
 	// Start cleanup routine
 	go bot.cleanupRoutine()
@@ -177,31 +168,7 @@ func (b *Bot) cleanupRoutine() {
 	ticker := time.NewTicker(b.cleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		b.cleanupExpiredVODLinks()
-		b.cleanupExpiredLinkTokens()
-	b.cleanupExpiredVODSelects()
-	}
-}
-
-// cleanupExpiredVODLinks removes VOD search results that have been pending for too long
-func (b *Bot) cleanupExpiredVODLinks() {
-	b.pendingVODLock.Lock()
-	defer b.pendingVODLock.Unlock()
-
-	// For simplicity, just clear all pending VOD links
-	// In a real implementation, you'd check timestamps
-	b.pendingVODLinks = make(map[string]map[int]types.VODResult)
-}
-
-// cleanupExpiredLinkTokens removes expired link tokens
-func (b *Bot) cleanupExpiredLinkTokens() {
-	b.linkTokensLock.Lock()
-	defer b.linkTokensLock.Unlock()
-
-	// For simplicity, just clear all link tokens
-	// In a real implementation, you'd check timestamps
-	b.linkTokens = make(map[string]string)
+	for range ticker.C { b.cleanupExpiredVODSelects() }
 }
 
 // cleanupExpiredVODSelects removes old interactive contexts to prevent leaks

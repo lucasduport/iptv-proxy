@@ -1,141 +1,217 @@
 package discord
 
 import (
-	"fmt"
-	"regexp"
-	"strings"
-	"time"
+    "fmt"
+    "regexp"
+    "sort"
+    "strconv"
+    "strings"
+    "time"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/lucasduport/stream-share/pkg/types"
-	"github.com/lucasduport/stream-share/pkg/utils"
+    "github.com/bwmarrin/discordgo"
+    "github.com/lucasduport/stream-share/pkg/types"
+    "github.com/lucasduport/stream-share/pkg/utils"
 )
 
-// handleShow handles the !show command. It provides a hierarchical flow:
-// 1) Search shows (series titles only)
-// 2) Pick a show -> list seasons
-// 3) Pick a season -> list sorted episodes
-// 4) Pick an episode -> start download
-func (b *Bot) handleShow(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	query := strings.TrimSpace(strings.Join(args, " "))
-	if query == "" {
-		b.info(m.ChannelID, "📺 Show Search",
-			"Usage: `!show <series>`\n\nExample: `!show Game of Thrones`")
-		return
-	}
+// handleVOD implements the unified !vod command that merges !movie and !show.
+// It searches across movies and series and lists everything in a single select with pagination.
+func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+    query := strings.TrimSpace(strings.Join(args, " "))
+    if query == "" {
+        b.info(m.ChannelID, "🎬 VOD Search", "Usage: `!vod <query>`\n\nSearches movies and shows. Use the dropdown to choose.")
+        return
+    }
 
-    // Show a loading embed while searching
+    utils.DebugLog("Discord: VOD query received: %q", query)
+    // Loading embed
     loading, _ := s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
         Title:       "🔎 Searching…",
-        Description: fmt.Sprintf("Looking for shows matching `%s`", query),
+        Description: fmt.Sprintf("Looking for `%s`", query),
         Color:       colorInfo,
         Timestamp:   time.Now().UTC().Format(time.RFC3339),
     })
 
-	// Resolve LDAP user for this Discord user
-	success, respData, err := b.makeAPIRequest("GET", "/discord/"+m.Author.ID+"/ldap", nil)
-    if err != nil || !success {
-        _ = editEmbed(s, loading, colorWarn, "🔗 Linking Required",
-            "Your Discord account is not linked to an IPTV user.\n\nPlease link it first:\n`!link <ldap_username>`")
+    // Resolve LDAP
+    ok, resp, err := b.makeAPIRequest("GET", "/discord/"+m.Author.ID+"/ldap", nil)
+    if err != nil || !ok {
+        _ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Your Discord account isn't linked. Use `!link <ldap_username>`. ")
         return
     }
-	data, ok := respData.(map[string]interface{})
-    if !ok { _ = editEmbed(s, loading, colorError, "❌ Unexpected Response", "Failed to process the server response."); return }
-	ldapUser, ok := data["ldap_user"].(string)
-    if !ok || ldapUser == "" { _ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. "); return }
+    dmap, _ := resp.(map[string]interface{})
+    ldapUser := getString(dmap, "ldap_user")
+    if ldapUser == "" { _ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. "); return }
 
-	// Use existing search API to fetch series results (it returns flattened episodes too)
-	searchData := map[string]string{"username": ldapUser, "query": query}
-    success, respData, err = b.makeAPIRequest("POST", "/vod/search", searchData)
-    if err != nil || !success { _ = editEmbed(s, loading, colorError, "❌ Search Failed", "Couldn't complete your search."); return }
-	data, ok = respData.(map[string]interface{})
-    if !ok { _ = editEmbed(s, loading, colorError, "❌ Unexpected Response", "Failed to process the search results."); return }
-	resultsData, ok := data["results"].([]interface{})
-    if !ok || len(resultsData) == 0 { _ = editEmbed(s, loading, colorInfo, "🔎 No Results", fmt.Sprintf("No shows found for `%s`.", query)); return }
+    // Search
+    ok, resp, err = b.makeAPIRequest("POST", "/vod/search", map[string]string{"username": ldapUser, "query": query})
+    if err != nil || !ok { _ = editEmbed(s, loading, colorError, "❌ Search Failed", "Couldn't complete search."); return }
+    mp, _ := resp.(map[string]interface{})
+    arr, _ := mp["results"].([]interface{})
+    utils.DebugLog("Discord: API returned %d VOD results for %q", len(arr), query)
+    if len(arr) == 0 { _ = editEmbed(s, loading, colorInfo, "🔎 No Results", fmt.Sprintf("No results for `%s`.", query)); return }
 
-	// Build a map: show title -> seasons -> episodes, based on results
-	showMap := map[string]map[int][]struct{ idx int; item types.VODResult }{}
-	// collect distinct shows preserving natural order
-	showOrder := []string{}
-	for idx, r := range resultsData {
-		if rm, ok := r.(map[string]interface{}); ok {
-			vr := types.VODResult{
-				ID:          getString(rm, "ID"),
-				Title:       getString(rm, "Title"),
-				Category:    getString(rm, "Category"),
-				Duration:    getString(rm, "Duration"),
-				Year:        getString(rm, "Year"),
-				Rating:      getString(rm, "Rating"),
-				StreamID:    getString(rm, "StreamID"),
-				Size:        getString(rm, "Size"),
-				StreamType:  getString(rm, "StreamType"),
-				SeriesTitle: getString(rm, "SeriesTitle"),
-			}
-			// parse season/episode if provided as numbers
-			if v, ok := rm["Season"]; ok {
-				switch t := v.(type) { case float64: vr.Season = int(t) }
-			}
-			if v, ok := rm["Episode"]; ok {
-				switch t := v.(type) { case float64: vr.Episode = int(t) }
-			}
-			// Accept both true series and episodic entries from M3U that look like SxxEyy
-			show := vr.SeriesTitle
-			season := vr.Season
-			episode := vr.Episode
-			epTitle := vr.EpisodeTitle
-			// Infer from title when type/fields are missing
-			if show == "" || season == 0 || episode == 0 {
-				if inferred, name, sn, ep, epT := inferSeriesFromTitle(vr.Title); inferred {
-					show = name
-					season = sn
-					episode = ep
-					if epTitle == "" { epTitle = epT }
-				}
-			}
-			if show == "" || season == 0 || episode == 0 { continue }
-			// Fill inferred metadata but keep original StreamType (download path may depend on it)
-			vr.SeriesTitle = show
-			vr.Season = season
-			vr.Episode = episode
-			if vr.EpisodeTitle == "" { vr.EpisodeTitle = epTitle }
-			if _, ok := showMap[show]; !ok { showMap[show] = map[int][]struct{ idx int; item types.VODResult }{}; showOrder = append(showOrder, show) }
-			showMap[show][season] = append(showMap[show][season], struct{ idx int; item types.VODResult }{idx: idx, item: vr})
-		}
-	}
-	if len(showOrder) == 0 { b.info(m.ChannelID, "📺 No Shows Found", fmt.Sprintf("No shows found for `%s`.", query)); return }
+    // Build results: include both movies and series episodes.
+    results := make([]types.VODResult, 0, len(arr))
+    for _, it := range arr {
+        if rm, ok := it.(map[string]interface{}); ok {
+            vr := types.VODResult{
+                ID:          getString(rm, "ID"),
+                Title:       getString(rm, "Title"),
+                Category:    getString(rm, "Category"),
+                Duration:    getString(rm, "Duration"),
+                Year:        getString(rm, "Year"),
+                Rating:      getString(rm, "Rating"),
+                StreamID:    getString(rm, "StreamID"),
+                Size:        getString(rm, "Size"),
+                StreamType:  strings.ToLower(getString(rm, "StreamType")),
+                SeriesTitle: getString(rm, "SeriesTitle"),
+            }
+            if v, ok := rm["Season"].(float64); ok { vr.Season = int(v) }
+            if v, ok := rm["Episode"].(float64); ok { vr.Episode = int(v) }
 
-	// Create a select of shows (first 25)
-	opts := make([]discordgo.SelectMenuOption, 0, len(showOrder))
-	max := len(showOrder)
-	if max > 25 { max = 25 }
-	for i := 0; i < max; i++ {
-		show := showOrder[i]
-		opts = append(opts, discordgo.SelectMenuOption{Label: show, Value: show})
-	}
-	one := 1
-	components := []discordgo.MessageComponent{
-		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.SelectMenu{CustomID: "show_pick", Placeholder: "Pick a show…", MinValues: &one, MaxValues: 1, Options: opts},
-		}},
-	}
-    embed := &discordgo.MessageEmbed{Title: "📺 Pick a Show", Description: fmt.Sprintf("Query: `%s` — %d match(es)", query, len(showOrder)), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
-    // Replace loading message with show picker
+            // If this looks like a series but fields are missing, infer from title
+            if vr.StreamType != "movie" {
+                if inferred, name, sn, ep, epT := inferSeriesFromTitleUnified(vr.Title); inferred {
+                    if vr.SeriesTitle == "" { vr.SeriesTitle = name }
+                    if vr.Season == 0 { vr.Season = sn }
+                    if vr.Episode == 0 { vr.Episode = ep }
+                    if vr.EpisodeTitle == "" { vr.EpisodeTitle = epT }
+                    if vr.StreamType == "" { vr.StreamType = "series" }
+                }
+            }
+            // Default empty type to movie to keep compatibility
+            if vr.StreamType == "" { vr.StreamType = "movie" }
+            results = append(results, vr)
+        }
+    }
+
+    // Stable sort: series episodes grouped by show/season/episode, movies by title/year
+    sort.SliceStable(results, func(i, j int) bool {
+        a, b := results[i], results[j]
+        if a.StreamType != b.StreamType {
+            // series before movies
+            return a.StreamType < b.StreamType
+        }
+        if a.StreamType == "series" && b.StreamType == "series" {
+            if a.SeriesTitle != b.SeriesTitle { return strings.ToLower(a.SeriesTitle) < strings.ToLower(b.SeriesTitle) }
+            if a.Season != b.Season { return a.Season < b.Season }
+            if a.Episode != b.Episode { return a.Episode < b.Episode }
+            return strings.ToLower(a.Title) < strings.ToLower(b.Title)
+        }
+        // movies
+        if a.Title != b.Title { return strings.ToLower(a.Title) < strings.ToLower(b.Title) }
+        return a.Year < b.Year
+    })
+
+    // Optional client-side filtering to improve matching like "game of throne s02e04"
+    tokens, fSeason, fEpisode := parseQueryFilters(query)
+    if len(tokens) > 0 { utils.DebugLog("Discord: filter tokens=%v season=%d episode=%d", tokens, fSeason, fEpisode) }
+    if len(tokens) > 0 {
+        results = filterVODResults(results, tokens, fSeason, fEpisode)
+    }
+    utils.DebugLog("Discord: results after filter: %d", len(results))
+    // Log first few for diagnostics
+    for i := 0; i < len(results) && i < 4; i++ {
+        r := results[i]
+        utils.DebugLog("Discord: result[%d]: type=%s id=%s title=%s series=%s S%02dE%02d", i, r.StreamType, r.StreamID, r.Title, r.SeriesTitle, r.Season, r.Episode)
+    }
+    if len(results) == 0 {
+        _ = editEmbed(s, loading, colorInfo, "🔎 No Results", fmt.Sprintf("No results matched `%s`. Try removing season/episode or using a shorter query.", query))
+        return
+    }
+
+    // Build interactive selection context and render
+    // Limit: single dropdown of 25 options per page with Prev/Next buttons when needed
+    total := len(results)
+    perPage := 25
+    withButtons := total > perPage
+    ctx := &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: query, Results: results, Page: 0, PerPage: perPage, Created: time.Now()}
+
+    // Prepare current page options across multiple selects
+    pages := (total + perPage - 1) / perPage
+    if pages == 0 { pages = 1 }
+    utils.DebugLog("Discord: rendering %d results perPage=%d pages=%d", total, perPage, pages)
+    start := 0
+    end := perPage
+    if end > total { end = total }
+    one := 1
+    components := make([]discordgo.MessageComponent, 0, 2)
+    // Single select of up to 25 options
+    opts := make([]discordgo.SelectMenuOption, 0, end-start)
+    for i := start; i < end; i++ {
+        r := results[i]
+        label := buildLabelForVOD(r)
+        if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
+        value := strconv.Itoa(i)
+        // Use single-line options to avoid confusing label+description as two entries
+        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: value})
+    }
+    placeholder := "Pick a title…"
+    if pages > 1 { placeholder = fmt.Sprintf("Pick a title… (%d/%d)", 1, pages) }
+    components = append(components, discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.SelectMenu{CustomID: "vod_select", Placeholder: placeholder, MinValues: &one, MaxValues: 1, Options: opts} }})
+    if withButtons {
+        components = append(components, discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.Button{Style: discordgo.SecondaryButton, Label: "Prev", CustomID: "vod_prev", Disabled: true}, discordgo.Button{Style: discordgo.SecondaryButton, Label: "Next", CustomID: "vod_next", Disabled: total <= perPage} }})
+    }
+    desc := fmt.Sprintf("Query: `%s` — %d result(s)%s\nUse the dropdown to choose.", query, total, func() string { if pages>1 { return fmt.Sprintf(" — Page 1/%d", pages) }; return "" }())
+    embed := &discordgo.MessageEmbed{Title: "🎬 VOD Search Results", Description: desc, Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
     embeds := []*discordgo.MessageEmbed{embed}
     if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: loading.ID, Channel: m.ChannelID, Embeds: &embeds, Components: &components}); err != nil {
-        // Fallback to sending a new message
-        msg, err2 := s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
-        if err2 != nil { utils.ErrorLog("Discord: failed to send show picker: %v", err2); return }
-        b.selectLock.Lock()
-        b.pendingVODSelect[msg.ID] = &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: "show:"+query, Results: nil, Page: 0, PerPage: 25, Created: time.Now()}
-        b.selectLock.Unlock()
-        b.setShowHierarchy(msg.ID, showMap, showOrder)
+        // Fallback to send new
+        msg, err2 := b.renderVODInteractiveMessage(s, ctx)
+        if err2 == nil {
+            b.selectLock.Lock(); b.pendingVODSelect[msg.ID] = ctx; b.selectLock.Unlock()
+        } else {
+            _ = editEmbed(s, loading, colorWarn, "Too Many Results", fmt.Sprintf("Your search returned %d items, which is too many to display at once. Please refine your query (e.g., add season/episode like `S01E01` or year).", total))
+            return
+        }
     } else {
-        // Attach context to the same message ID
-        b.selectLock.Lock()
-        b.pendingVODSelect[loading.ID] = &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: "show:"+query, Results: nil, Page: 0, PerPage: 25, Created: time.Now()}
-        b.selectLock.Unlock()
-        b.setShowHierarchy(loading.ID, showMap, showOrder)
+        b.selectLock.Lock(); b.pendingVODSelect[loading.ID] = ctx; b.selectLock.Unlock()
     }
+}
+
+// Helper to build a concise label for a VODResult
+func buildLabelForVOD(r types.VODResult) string {
+    if r.StreamType == "series" && r.SeriesTitle != "" && r.Episode > 0 {
+        base := fmt.Sprintf("%s S%02dE%02d", r.SeriesTitle, r.Season, r.Episode)
+        if r.EpisodeTitle != "" { base += " — " + r.EpisodeTitle }
+        if r.Year != "" { base += fmt.Sprintf(" (%s)", r.Year) }
+        return base
+    }
+    label := r.Title
+    if r.Year != "" { label = fmt.Sprintf("%s (%s)", label, r.Year) }
+    return label
+}
+
+// Helper to build description line for a VODResult
+func buildDescriptionForVOD(r types.VODResult) string {
+    parts := []string{}
+    if r.StreamType != "" { parts = append(parts, strings.Title(r.StreamType)) }
+    if r.Category != "" { parts = append(parts, r.Category) }
+    if r.Size != "" { parts = append(parts, r.Size) }
+    if r.Rating != "" { parts = append(parts, "⭐ "+r.Rating) }
+    return strings.Join(parts, "  •  ")
+}
+
+// inferSeriesFromTitleUnified is a local variant to avoid import loops here and allow tweaks.
+func inferSeriesFromTitleUnified(title string) (bool, string, int, int, string) {
+    t := strings.TrimSpace(title)
+    if t == "" { return false, "", 0, 0, "" }
+    re1 := regexp.MustCompile(`(?i)^(.*?)\s*(?:\([^)]*\)\s*)?(?:FHD|HD|UHD|4K|1080p|720p|MULTI)?\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:]\s*(.*))?$`)
+    if m := re1.FindStringSubmatch(t); m != nil {
+        name := cleanSeriesName(m[1])
+        sn := atoiSafe(m[2])
+        ep := atoiSafe(m[3])
+        epTitle := strings.TrimSpace(m[4])
+        return true, name, sn, ep, epTitle
+    }
+    re2 := regexp.MustCompile(`(?i)^(.*?)\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:]\s*(.*))?`)
+    if m := re2.FindStringSubmatch(t); m != nil {
+        name := cleanSeriesName(m[1])
+        sn := atoiSafe(m[2])
+        ep := atoiSafe(m[3])
+        epTitle := strings.TrimSpace(m[4])
+        return true, name, sn, ep, epTitle
+    }
+    return false, "", 0, 0, ""
 }
 
 // handleCachedList shows current cached items with time until expiry
@@ -196,35 +272,6 @@ func (b *Bot) handleCachedList(s *discordgo.Session, m *discordgo.MessageCreate)
 		if pages > 1 { desc += fmt.Sprintf("\n\nPage %d/%d", p+1, pages) }
 		b.info(m.ChannelID, "💾 Cached Items", desc)
 	}
-}
-
-// inferSeriesFromTitle tries to parse titles like:
-//   "Game of Thrones (MULTI) FHD S07 E05"
-//   "Game of Thrones S08E01 — Winterfell"
-//   "The Office (US) 1080p S3E12"
-// Returns (true, seriesTitle, season, episode, episodeTitle) on success.
-func inferSeriesFromTitle(title string) (bool, string, int, int, string) {
-	t := strings.TrimSpace(title)
-	if t == "" { return false, "", 0, 0, "" }
-	// Variant 1: ... S07 E05 ... (optional separator and ep title at end)
-	re1 := regexp.MustCompile(`(?i)^(.*?)\s*(?:\([^)]*\)\s*)?(?:FHD|HD|UHD|4K|1080p|720p|MULTI)?\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:]\s*(.*))?$`)
-	if m := re1.FindStringSubmatch(t); m != nil {
-		name := cleanSeriesName(m[1])
-		sn := atoiSafe(m[2])
-		ep := atoiSafe(m[3])
-		epTitle := strings.TrimSpace(m[4])
-		return true, name, sn, ep, epTitle
-	}
-	// Variant 2: allow compact S01E02
-	re2 := regexp.MustCompile(`(?i)^(.*?)\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:]\s*(.*))?`)
-	if m := re2.FindStringSubmatch(t); m != nil {
-		name := cleanSeriesName(m[1])
-		sn := atoiSafe(m[2])
-		ep := atoiSafe(m[3])
-		epTitle := strings.TrimSpace(m[4])
-		return true, name, sn, ep, epTitle
-	}
-	return false, "", 0, 0, ""
 }
 
 func cleanSeriesName(s string) string {

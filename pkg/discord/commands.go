@@ -27,10 +27,8 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
     switch command {
     case "link":
         b.handleLink(s, m, args)
-    case "movie":
-        b.handleMovie(s, m, args)
-    case "show":
-        b.handleShow(s, m, args)
+    case "vod":
+        b.handleVOD(s, m, args)
     case "status":
         b.handleStatus(s, m, args)
     case "cache":
@@ -53,8 +51,7 @@ func (b *Bot) handleHelp(s *discordgo.Session, m *discordgo.MessageCreate) {
     var cmd strings.Builder
     cmd.WriteString("**User Commands**\n")
     cmd.WriteString("• `!link <ldap_username>` — Link your Discord account.\n")
-    cmd.WriteString("• `!movie <title>` — Search movies; use the dropdown to pick.\n")
-    cmd.WriteString("• `!show <series>` — Pick a show, then season and episode easily.\n")
+    cmd.WriteString("• `!vod <query>` — Search movies and shows; use the dropdown to pick.\n")
     cmd.WriteString("• `!cache <title> <days>` — Cache a movie or episode on the server for up to 14 days.\n")
     cmd.WriteString("• `!cached` — List cached items and when they expire.\n")
     cmd.WriteString("• `!status` — Show active streams and users.\n")
