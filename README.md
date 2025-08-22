@@ -186,97 +186,6 @@ STREAM_TIMEOUT_MINUTES=240   # Stream session timeout (default: 120)
 TEMP_LINK_HOURS=24           # Temporary link validity (default: 24)
 ```
 
----
-
-## Full Docker Compose Example
-
-```yaml
-services:
-  streamshare:
-    image: lucasduport/streamshare:latest
-    container_name: streamshare
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      # --- REQUIRED SETTINGS ---
-      M3U_URL: "http://provider.example.com/playlist.m3u"
-      PORT: 8080
-      HOSTNAME: "streamshare.example.com"
-
-      # --- IPTV PROVIDER SETTINGS ---
-      XTREAM_USER: "provider_username"
-      XTREAM_PASSWORD: "provider_password"
-      XTREAM_BASE_URL: "http://provider.example.com:1234"
-
-      # --- AUTHENTICATION ---
-      # For basic authentication:
-      USER: "local_user"
-      PASSWORD: "local_password"
-      
-      # For LDAP authentication:
-      LDAP_ENABLED: "true"
-      LDAP_SERVER: "ldap://ldap.example.com:389"
-      LDAP_BASE_DN: "ou=people,dc=example,dc=com"
-      LDAP_BIND_DN: "uid=admin,ou=people,dc=example,dc=com"
-      LDAP_BIND_PASSWORD: "admin_password"
-      LDAP_USER_ATTRIBUTE: "uid"
-      LDAP_GROUP_ATTRIBUTE: "memberOf"
-      LDAP_REQUIRED_GROUP: "iptv"
-
-      # --- MULTIPLEXING & SESSIONS ---
-      SESSION_TIMEOUT_MINUTES: "120"
-      STREAM_TIMEOUT_MINUTES: "240"
-      TEMP_LINK_HOURS: "24"
-      FORCE_MULTIPLEXING: "true"  # Force multiplexing for all streams
-
-      # --- DISCORD BOT ---
-      DISCORD_BOT_TOKEN: "your_discord_bot_token"
-      DISCORD_ADMIN_ROLE_ID: "1234567890"
-  # Internal API key used by the bot (optional – auto-generated if unset)
-  # INTERNAL_API_KEY: "set-a-strong-random-key"
-      
-      # --- DATABASE ---
-      DB_HOST: "postgres"
-      DB_PORT: "5432"
-      DB_NAME: "streamshare"
-      DB_USER: "streamshare"
-      DB_PASSWORD: "dbpassword"
-      
-      # --- PERFORMANCE & LOGGING ---
-      GIN_MODE: "release"
-      DEBUG_LOGGING: "false"
-      CACHE_FOLDER: "/cache"
-  # Prefer specific VOD extensions when resolving (optional)
-  # VOD_EXT_ORDER: "mp4,ts,mkv"
-
-    volumes:
-      - streamshare_data:/data
-      - streamshare_cache:/cache
-    depends_on:
-      - postgres
-
-  postgres:
-    image: postgres:14-alpine
-    container_name: streamshare-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: streamshare
-      POSTGRES_PASSWORD: dbpassword
-      POSTGRES_DB: streamshare
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  streamshare_data:
-  streamshare_cache:
-  postgres_data:
-```
-
----
-
-## Advanced Configuration
-
 ### Direct Stream URLs
 
 StreamShare supports direct stream URLs with proxy authentication in the path:
@@ -317,7 +226,6 @@ Cache movies or episodes to disk for faster start times and to reduce upstream u
 Configuration:
 - `CACHE_FOLDER` — Absolute path where cached files are stored.
 - `INTERNAL_API_KEY` — API key used by the internal API (Discord bot and tools).
-- `VOD_EXT_ORDER` — Optional comma-separated list to prefer file extensions for VOD (e.g., `mp4,ts,mkv`).
 
 ---
 

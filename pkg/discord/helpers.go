@@ -29,6 +29,15 @@ import (
     "github.com/lucasduport/stream-share/pkg/utils"
 )
 
+// trimTo shortens s to at most max runes, appending … if trimmed (requires max >= 3 to include ellipsis)
+func trimTo(s string, max int) string {
+    if max <= 0 { return "" }
+    r := []rune(s)
+    if len(r) <= max { return s }
+    if max <= 3 { return string(r[:max]) }
+    return string(r[:max-3]) + "..."
+}
+
 // getString safely extracts string from a map[string]interface{}
 func getString(m map[string]interface{}, key string) string {
     if val, ok := m[key].(string); ok {

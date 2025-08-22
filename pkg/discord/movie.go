@@ -48,8 +48,9 @@ func (b *Bot) renderVODInteractiveMessage(s *discordgo.Session, ctx *vodSelectCo
         if r.Size != "" { label = fmt.Sprintf("%s — %s", label, r.Size) }
         if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
         value := strconv.Itoa(i)
-        desc := buildDescriptionForVOD(r)
-        options = append(options, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
+    desc := buildDescriptionForVOD(r)
+    if len([]rune(desc)) > 100 { desc = trimTo(desc, 100) }
+    options = append(options, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
     }
     placeholder := "Pick a title…"
     if pages > 1 { placeholder = fmt.Sprintf("Pick a title… (%d/%d)", ctx.Page+1, pages) }
@@ -93,8 +94,9 @@ func (b *Bot) updateVODInteractiveMessage(s *discordgo.Session, messageID string
         if r.Size != "" { label = fmt.Sprintf("%s — %s", label, r.Size) }
         if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
         value := strconv.Itoa(i)
-        desc := buildDescriptionForVOD(r)
-        options = append(options, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
+    desc := buildDescriptionForVOD(r)
+    if len([]rune(desc)) > 100 { desc = trimTo(desc, 100) }
+    options = append(options, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
     }
     placeholder := "Pick a title…"
     if pages > 1 { placeholder = fmt.Sprintf("Pick a title… (%d/%d)", ctx.Page+1, pages) }

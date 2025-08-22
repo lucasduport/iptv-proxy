@@ -153,14 +153,17 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.InfoLog("Initializing Discord bot")
 		discordAdminRole := os.Getenv("DISCORD_ADMIN_ROLE_ID")
 
-		// Get API URL from config, defaulting to localhost
+		// Get API URL from config, defaulting to host/port, but honor REVERSE_PROXY
 		apiURL := os.Getenv("DISCORD_API_URL")
 		if apiURL == "" {
 			protocol := "http"
-			if config.HTTPS {
-				protocol = "https"
+			if config.HTTPS { protocol = "https" }
+			hostPart := fmt.Sprintf("%s:%d", config.HostConfig.Hostname, config.HostConfig.Port)
+			if rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY"))); rev == "1" || rev == "true" || rev == "yes" {
+				// Behind reverse proxy: use hostname without port by default
+				hostPart = config.HostConfig.Hostname
 			}
-			apiURL = fmt.Sprintf("%s://%s:%d", protocol, config.HostConfig.Hostname, config.HostConfig.Port)
+			apiURL = fmt.Sprintf("%s://%s", protocol, hostPart)
 		}
 		utils.InfoLog("Discord API URL used by bot: %s", apiURL)
 		utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in Discord Developer Portal for this bot.")

@@ -1,19 +1,33 @@
+/*
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package discord
 
 import (
     "fmt"
-    "regexp"
-    "sort"
-    "strconv"
     "strings"
     "time"
 
     "github.com/bwmarrin/discordgo"
-    "github.com/lucasduport/stream-share/pkg/types"
     "github.com/lucasduport/stream-share/pkg/utils"
 )
 
-// handleVOD implements the unified !vod command that merges !movie and !show.
+// handleVOD implements the /vod command
 // It searches across movies and series and lists everything in a single select with pagination.
 func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
     query := strings.TrimSpace(strings.Join(args, " "))
@@ -48,59 +62,10 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
     arr, _ := mp["results"].([]interface{})
     utils.DebugLog("Discord: API returned %d VOD results for %q", len(arr), query)
     if len(arr) == 0 { _ = editEmbed(s, loading, colorInfo, "🔎 No Results", fmt.Sprintf("No results for `%s`.", query)); return }
-
-    // Build results: include both movies and series episodes.
-    results := make([]types.VODResult, 0, len(arr))
-    for _, it := range arr {
-        if rm, ok := it.(map[string]interface{}); ok {
-            vr := types.VODResult{
-                ID:          getString(rm, "ID"),
-                Title:       getString(rm, "Title"),
-                Category:    getString(rm, "Category"),
-                Duration:    getString(rm, "Duration"),
-                Year:        getString(rm, "Year"),
-                Rating:      getString(rm, "Rating"),
-                StreamID:    getString(rm, "StreamID"),
-                Size:        getString(rm, "Size"),
-                StreamType:  strings.ToLower(getString(rm, "StreamType")),
-                SeriesTitle: getString(rm, "SeriesTitle"),
-            }
-            if v, ok := rm["Season"].(float64); ok { vr.Season = int(v) }
-            if v, ok := rm["Episode"].(float64); ok { vr.Episode = int(v) }
-
-            // If this looks like a series but fields are missing, infer from title
-            if vr.StreamType != "movie" {
-                if inferred, name, sn, ep, epT := inferSeriesFromTitleUnified(vr.Title); inferred {
-                    if vr.SeriesTitle == "" { vr.SeriesTitle = name }
-                    if vr.Season == 0 { vr.Season = sn }
-                    if vr.Episode == 0 { vr.Episode = ep }
-                    if vr.EpisodeTitle == "" { vr.EpisodeTitle = epT }
-                    if vr.StreamType == "" { vr.StreamType = "series" }
-                }
-            }
-            // Default empty type to movie to keep compatibility
-            if vr.StreamType == "" { vr.StreamType = "movie" }
-            results = append(results, vr)
-        }
-    }
+    results := toVODResults(arr)
 
     // Stable sort: series episodes grouped by show/season/episode, movies by title/year
-    sort.SliceStable(results, func(i, j int) bool {
-        a, b := results[i], results[j]
-        if a.StreamType != b.StreamType {
-            // series before movies
-            return a.StreamType < b.StreamType
-        }
-        if a.StreamType == "series" && b.StreamType == "series" {
-            if a.SeriesTitle != b.SeriesTitle { return strings.ToLower(a.SeriesTitle) < strings.ToLower(b.SeriesTitle) }
-            if a.Season != b.Season { return a.Season < b.Season }
-            if a.Episode != b.Episode { return a.Episode < b.Episode }
-            return strings.ToLower(a.Title) < strings.ToLower(b.Title)
-        }
-        // movies
-        if a.Title != b.Title { return strings.ToLower(a.Title) < strings.ToLower(b.Title) }
-        return a.Year < b.Year
-    })
+    sortVODResults(results)
 
     // Optional client-side filtering to improve matching like "game of throne s02e04"
     tokens, fSeason, fEpisode := parseQueryFilters(query)
@@ -127,22 +92,7 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
     ctx := &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: query, Results: results, Page: 0, PerPage: perPage, Created: time.Now(), EnrichedPages: map[int]bool{}}
 
     // Enrich only the first page sizes/metadata from server to keep fast responses
-    if len(results) > 0 {
-        payload := map[string]interface{}{"query": query, "results": results, "page": 0, "per_page": perPage}
-        if ok2, resp2, err2 := b.makeAPIRequest("POST", "/vod/enrich", payload); err2 == nil && ok2 {
-            if mp2, _ := resp2.(map[string]interface{}); mp2 != nil {
-                if arr2, _ := mp2["results"].([]interface{}); len(arr2) == len(results) {
-                    // Map back minimal fields we care about (Size/SizeBytes) into our results slice
-                    for i := 0; i < len(results) && i < len(arr2); i++ {
-                        if rm, ok := arr2[i].(map[string]interface{}); ok {
-                            if v, ok := rm["Size"].(string); ok { results[i].Size = v }
-                            if vb, ok := rm["SizeBytes"].(float64); ok { results[i].SizeBytes = int64(vb) }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    b.enrichFirstPage(query, results, perPage)
 
     // Prepare current page options across multiple selects
     pages := (total + perPage - 1) / perPage
@@ -154,17 +104,7 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
     one := 1
     components := make([]discordgo.MessageComponent, 0, 2)
     // Single select of up to 25 options
-    opts := make([]discordgo.SelectMenuOption, 0, end-start)
-    for i := start; i < end; i++ {
-        r := results[i]
-        label := buildLabelForVOD(r)
-        if r.Size != "" { label = fmt.Sprintf("%s — %s", label, r.Size) }
-        if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
-        value := strconv.Itoa(i)
-        // Add helpful context in description (size and rating only; no duration)
-        desc := buildDescriptionForVOD(r)
-        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
-    }
+    opts := buildOptionsForRange(results, start, end)
     placeholder := "Pick a title…"
     if pages > 1 { placeholder = fmt.Sprintf("Pick a title… (%d/%d)", 1, pages) }
     components = append(components, discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.SelectMenu{CustomID: "vod_select", Placeholder: placeholder, MinValues: &one, MaxValues: 1, Options: opts} }})
@@ -189,52 +129,6 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
     }
     // Mark first page as enriched
     if ctx.EnrichedPages != nil { ctx.EnrichedPages[0] = true }
-}
-
-// Helper to build a concise label for a VODResult
-func buildLabelForVOD(r types.VODResult) string {
-    if r.StreamType == "series" && r.SeriesTitle != "" && r.Episode > 0 {
-        base := fmt.Sprintf("%s S%02dE%02d", r.SeriesTitle, r.Season, r.Episode)
-        if r.EpisodeTitle != "" { base += " — " + r.EpisodeTitle }
-        if r.Year != "" { base += fmt.Sprintf(" (%s)", r.Year) }
-        return base
-    }
-    label := r.Title
-    if r.Year != "" { label = fmt.Sprintf("%s (%s)", label, r.Year) }
-    return label
-}
-
-// Helper to build description line for a VODResult
-func buildDescriptionForVOD(r types.VODResult) string {
-    parts := []string{}
-    if r.StreamType != "" { parts = append(parts, strings.Title(r.StreamType)) }
-    if r.Category != "" { parts = append(parts, r.Category) }
-    if r.Size != "" { parts = append(parts, r.Size) }
-    if r.Rating != "" { parts = append(parts, "⭐ "+r.Rating) }
-    return strings.Join(parts, "  •  ")
-}
-
-// inferSeriesFromTitleUnified is a local variant to avoid import loops here and allow tweaks.
-func inferSeriesFromTitleUnified(title string) (bool, string, int, int, string) {
-    t := strings.TrimSpace(title)
-    if t == "" { return false, "", 0, 0, "" }
-    re1 := regexp.MustCompile(`(?i)^(.*?)\s*(?:\([^)]*\)\s*)?(?:FHD|HD|UHD|4K|1080p|720p|MULTI)?\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:]\s*(.*))?$`)
-    if m := re1.FindStringSubmatch(t); m != nil {
-        name := cleanSeriesName(m[1])
-        sn := atoiSafe(m[2])
-        ep := atoiSafe(m[3])
-        epTitle := strings.TrimSpace(m[4])
-        return true, name, sn, ep, epTitle
-    }
-    re2 := regexp.MustCompile(`(?i)^(.*?)\s*S(\d{1,2})\s*[EEx×](\d{1,2})(?:\s*[-–—:]\s*(.*))?`)
-    if m := re2.FindStringSubmatch(t); m != nil {
-        name := cleanSeriesName(m[1])
-        sn := atoiSafe(m[2])
-        ep := atoiSafe(m[3])
-        epTitle := strings.TrimSpace(m[4])
-        return true, name, sn, ep, epTitle
-    }
-    return false, "", 0, 0, ""
 }
 
 // handleCachedList shows current cached items with time until expiry
@@ -295,24 +189,4 @@ func (b *Bot) handleCachedList(s *discordgo.Session, m *discordgo.MessageCreate)
 		if pages > 1 { desc += fmt.Sprintf("\n\nPage %d/%d", p+1, pages) }
 		b.info(m.ChannelID, "💾 Cached Items", desc)
 	}
-}
-
-func cleanSeriesName(s string) string {
-	s = strings.TrimSpace(s)
-	// Remove trailing quality tokens if any
-	s = regexp.MustCompile(`(?i)\b(FHD|HD|UHD|4K|1080p|720p|MULTI)\b`).ReplaceAllString(s, "")
-	// Remove stray separators
-	s = strings.Trim(s, "-—–:|• ")
-	// Collapse spaces
-	s = strings.Join(strings.Fields(s), " ")
-	return s
-}
-
-func atoiSafe(s string) int {
-	n := 0
-	for _, ch := range s {
-		if ch < '0' || ch > '9' { continue }
-		n = n*10 + int(ch-'0')
-	}
-	return n
 }

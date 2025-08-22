@@ -14,6 +14,7 @@ services:
       PORT: 8080                       # Port to listen on
       ADVERTISED_PORT: 443             # Port to advertise in URLs (for reverse proxy)
       HOSTNAME: ""                     # Hostname to use in URLs
+      REVERSE_PROXY: "true"            # Whether behind a reverse proxy (for correct URL generation)
       GIN_MODE: "release"              # Gin mode (debug or release) - read by Gin automatically if set
       HTTPS: "1"                       # Use HTTPS in generated URLs
       CUSTOM_ENDPOINT: ""              # Custom endpoint path
