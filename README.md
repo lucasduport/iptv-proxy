@@ -30,7 +30,18 @@ StreamShare is a comprehensive IPTV management solution that allows secure shari
   - Docker-ready with comprehensive environment variables
   - Reverse proxy compatibility with HTTPS support
 
----
+### Upcoming Features
+- **Improve priorization between live streaming and download requests**
+  - Implement smarter queuing mechanisms for better resource allocation
+  - Prioritize live streaming requests over downloads for improved user experience
+  - Allow urgent download requests to bypass queues
+- **Enhanced /link command**
+  - Improved link command being able to link a user that is not me.
+- **User Statistics**
+  - Detailed user activity reports
+  - Streaming quality metrics and analytics
+- **Frontend for download link generation**
+  - User-friendly interface for creating and managing download links
 
 ## How It Works
 
