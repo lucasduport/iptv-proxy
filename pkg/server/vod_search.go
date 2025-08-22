@@ -37,7 +37,7 @@ import (
 
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
-	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream-proxy"
+	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 )
 
 var vodM3UMu sync.Mutex
