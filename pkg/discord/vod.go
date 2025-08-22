@@ -11,8 +11,6 @@ import (
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
-// (movie-related types and functions moved to movie.go)
-
 // handleShow handles the !show command. It provides a hierarchical flow:
 // 1) Search shows (series titles only)
 // 2) Pick a show -> list seasons

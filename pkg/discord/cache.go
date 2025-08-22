@@ -15,7 +15,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
- 
+
 package discord
 
 import (
@@ -177,41 +177,4 @@ func (b *Bot) startVODCacheFromSelection(s *discordgo.Session, channelID, userID
         emb := &discordgo.MessageEmbed{Title: "💾 Caching", Description: fmt.Sprintf("%s\nExpires: %s\n\n%s (%d%%)", title, exp, bar, percent), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
         _, _ = b.session.ChannelMessageEditEmbed(channelID, msg.ID, emb)
     }
-}
-
-func getInt64(m map[string]interface{}, k string) int64 {
-    if v, ok := m[k]; ok {
-        switch t := v.(type) {
-        case float64:
-            return int64(t)
-        case int64:
-            return t
-        case int:
-            return int64(t)
-        case string:
-            if n, err := strconv.ParseInt(t, 10, 64); err == nil { return n }
-        }
-    }
-    return 0
-}
-
-// renderBar returns a textual progress bar and bytes summary
-func renderBar(done, total int64) string {
-    // 20 char bar
-    const width = 20
-    var pct int
-    if total > 0 { pct = int((done*100)/total) } else { pct = 0 }
-    if pct > 100 { pct = 100 }
-    filled := (pct * width) / 100
-    if filled > width { filled = width }
-    bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-    var size string
-    if total > 0 {
-        size = fmt.Sprintf("%s/%s", utils.HumanBytes(done), utils.HumanBytes(total))
-    } else if done > 0 {
-        size = fmt.Sprintf("%s", utils.HumanBytes(done))
-    } else {
-        size = "starting…"
-    }
-    return fmt.Sprintf("`[%s]` %d%% — %s", bar, pct, size)
 }

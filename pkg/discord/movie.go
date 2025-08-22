@@ -11,17 +11,6 @@ import (
     "github.com/lucasduport/stream-share/pkg/utils"
 )
 
-// Context for component-based VOD selection (dropdown + buttons)
-type vodSelectContext struct {
-    UserID  string
-    Channel string
-    Query   string
-    Results []types.VODResult
-    Page    int
-    PerPage int
-    Created time.Time
-}
-
 // handleMovie handles the !movie command (search movies only)
 func (b *Bot) handleMovie(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
     query := strings.TrimSpace(strings.Join(args, " "))
@@ -176,15 +165,6 @@ func (b *Bot) handleMovie(s *discordgo.Session, m *discordgo.MessageCreate, args
     } else {
         b.selectLock.Lock(); b.pendingVODSelect[loading.ID] = ctx; b.selectLock.Unlock()
     }
-}
-
-// editEmbed helps transform a previously sent embed message into another embed
-func editEmbed(s *discordgo.Session, msg *discordgo.Message, color int, title, desc string) error {
-    if msg == nil { return nil }
-    embed := &discordgo.MessageEmbed{Title: title, Description: desc, Color: color, Timestamp: time.Now().UTC().Format(time.RFC3339)}
-    embeds := []*discordgo.MessageEmbed{embed}
-    _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: msg.ID, Channel: msg.ChannelID, Embeds: &embeds})
-    return err
 }
 
 // Renders or updates the interactive VOD selection message.
