@@ -339,14 +339,16 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 		return
 	}
 
-	// If cached locally, serve from disk
+	// If cached locally, serve from disk (normalize ID without extension)
 	if c.db != nil && tempLink.StreamID != "" {
-		if entry, err := c.db.GetVODCache(tempLink.StreamID); err == nil && entry != nil && entry.Status == "ready" {
+		idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
+		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
 			utils.InfoLog("Download via cache for stream %s -> %s", tempLink.StreamID, entry.FilePath)
 			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
-			ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, tempLink.Title, ext))
-			_ = c.db.TouchVODCache(tempLink.StreamID)
-			ctx.File(entry.FilePath)
+			_ = c.db.TouchVODCache(idRaw)
+			var ct string
+			switch ext { case ".ts": ct = "video/mp2t"; case ".mkv": ct = "video/x-matroska"; case ".mp4": ct = "video/mp4"; default: ct = "application/octet-stream" }
+			serveLocalFileRange(ctx, entry.FilePath, ct, tempLink.Title+ext, true)
 			return
 		}
 	}
@@ -376,6 +378,8 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 
 	// Extract stream ID and type
 	streamID := path.Base(targetURL.Path)
+	// Normalize stream id for cache lookup (strip extension if present)
+	streamIDRaw := strings.TrimSuffix(streamID, path.Ext(streamID))
 	streamType := "unknown"
 	p := targetURL.Path
 	if strings.Contains(p, "/movie/") {
@@ -399,22 +403,17 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 
 	// If VOD and cached locally, serve from disk to avoid upstream connection
 	if c.db != nil && (streamType == "movie" || streamType == "series") {
-		if entry, err := c.db.GetVODCache(streamID); err == nil && entry != nil && entry.Status == "ready" {
+		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
 			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, streamID, entry.FilePath)
+				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, streamIDRaw, entry.FilePath)
 				// Content-Type based on file extension
-				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
-					ctx.Header("Content-Type", "video/mp2t")
-				} else if ext == ".mkv" {
-					ctx.Header("Content-Type", "video/x-matroska")
-				} else {
-					ctx.Header("Content-Type", "video/mp4")
-				}
-				_ = c.db.TouchVODCache(streamID)
-				ctx.File(entry.FilePath)
+				var ct string
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
+				_ = c.db.TouchVODCache(streamIDRaw)
+				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}
-			utils.WarnLog("Multiplex: cached %s missing on disk for stream %s at %s; falling back to upstream", streamType, streamID, entry.FilePath)
+			utils.WarnLog("Multiplex: cached %s missing on disk for stream %s at %s; falling back to upstream", streamType, streamIDRaw, entry.FilePath)
 		}
 	}
 

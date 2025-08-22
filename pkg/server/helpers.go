@@ -19,9 +19,13 @@
 package server
 
 import (
+    "fmt"
+    "io"
+    "net/http"
     "path"
     "strings"
-    "net/http"
+    "os"
+    "strconv"
 
     "github.com/gin-gonic/gin"
 )
@@ -94,4 +98,134 @@ func mergeHttpHeader(dst, src http.Header) {
             dst.Add(k, v)
         }
     }
+}
+
+// serveLocalFileRange serves a local file with HTTP Range support for seamless seeking.
+// If asAttachment is true, a Content-Disposition header will be set using filename.
+func serveLocalFileRange(ctx *gin.Context, filePath string, contentType string, filename string, asAttachment bool) {
+    // Stat file
+    fi, err := os.Stat(filePath)
+    if err != nil || fi.IsDir() {
+        ctx.Status(http.StatusNotFound)
+        return
+    }
+
+    // Open file
+    f, err := os.Open(filePath)
+    if err != nil {
+        ctx.Status(http.StatusInternalServerError)
+        return
+    }
+    defer f.Close()
+
+    size := fi.Size()
+    modTime := fi.ModTime()
+
+    // Common headers
+    if contentType == "" { contentType = "application/octet-stream" }
+    ctx.Header("Content-Type", contentType)
+    ctx.Header("Accept-Ranges", "bytes")
+    ctx.Header("Last-Modified", modTime.UTC().Format(http.TimeFormat))
+    ctx.Header("X-Accel-Buffering", "no")
+    if asAttachment {
+        if filename == "" { filename = path.Base(filePath) }
+        ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+    }
+
+    // Handle HEAD quickly (respect Range semantics by sending appropriate headers without body)
+    if ctx.Request.Method == http.MethodHead {
+        rangeHdr := ctx.GetHeader("Range")
+        if rangeHdr == "" {
+            ctx.Header("Content-Length", strconv.FormatInt(size, 10))
+            ctx.Status(http.StatusOK)
+            return
+        }
+        // Parse single range only
+        start, end, ok := parseRange(rangeHdr, size)
+        if !ok {
+            ctx.Header("Content-Range", fmt.Sprintf("bytes */%d", size))
+            ctx.Status(http.StatusRequestedRangeNotSatisfiable)
+            return
+        }
+        length := end - start + 1
+        ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+        ctx.Header("Content-Length", strconv.FormatInt(length, 10))
+        ctx.Status(http.StatusPartialContent)
+        return
+    }
+
+    // GET with optional Range
+    rangeHdr := ctx.GetHeader("Range")
+    if rangeHdr == "" {
+        // Full content
+        ctx.Header("Content-Length", strconv.FormatInt(size, 10))
+        ctx.Status(http.StatusOK)
+        // Stream efficiently
+        if _, err := io.Copy(ctx.Writer, f); err != nil {
+            // client likely disconnected; just end
+        }
+        return
+    }
+
+    // Parse and serve partial content
+    start, end, ok := parseRange(rangeHdr, size)
+    if !ok {
+        ctx.Header("Content-Range", fmt.Sprintf("bytes */%d", size))
+        ctx.Status(http.StatusRequestedRangeNotSatisfiable)
+        return
+    }
+    length := end - start + 1
+    if _, err := f.Seek(start, io.SeekStart); err != nil {
+        ctx.Status(http.StatusInternalServerError)
+        return
+    }
+    ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+    ctx.Header("Content-Length", strconv.FormatInt(length, 10))
+    ctx.Status(http.StatusPartialContent)
+
+    // Copy desired range
+    if _, err := io.CopyN(ctx.Writer, f, length); err != nil {
+        // client canceled or short read; end
+        return
+    }
+}
+
+// parseRange parses a single HTTP Range header value "bytes=start-end" with support
+// for open-ended and suffix ranges. Returns start, end, ok.
+func parseRange(h string, size int64) (int64, int64, bool) {
+    h = strings.TrimSpace(h)
+    if h == "" || !strings.HasPrefix(strings.ToLower(h), "bytes=") {
+        return 0, 0, false
+    }
+    spec := strings.TrimSpace(h[len("bytes="):])
+    // Only first range supported
+    if idx := strings.Index(spec, ","); idx != -1 {
+        spec = spec[:idx]
+    }
+    parts := strings.Split(spec, "-")
+    if len(parts) != 2 {
+        return 0, 0, false
+    }
+    // Suffix range: bytes=-N
+    if parts[0] == "" {
+        // last N bytes
+        n, err := strconv.ParseInt(parts[1], 10, 64)
+        if err != nil || n <= 0 {
+            return 0, 0, false
+        }
+        if n > size { n = size }
+        return size - n, size - 1, true
+    }
+    // Normal or open-ended
+    start, err := strconv.ParseInt(parts[0], 10, 64)
+    if err != nil || start < 0 || start >= size {
+        return 0, 0, false
+    }
+    if parts[1] == "" {
+        return start, size - 1, true
+    }
+    end, err := strconv.ParseInt(parts[1], 10, 64)
+    if err != nil || end < start { return 0, 0, false }
+    if end >= size { end = size - 1 }
+    return start, end, true
 }
