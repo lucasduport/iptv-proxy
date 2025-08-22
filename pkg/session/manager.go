@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"sync"
 	"time"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/lucasduport/stream-share/pkg/database"
@@ -443,8 +444,23 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		return
 	}
 
-	// Set common headers for the request
-	req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+	// Set headers; for VOD/series use a strict whitelist header set
+	isVOD := strings.Contains(upstreamURL.Path, "/movie/") || strings.Contains(upstreamURL.Path, "/series/")
+	if isVOD {
+		h := http.Header{}
+		h.Set("User-Agent", utils.GetIPTVUserAgent())
+		h.Set("Accept", "*/*")
+	h.Set("Accept-Language", utils.GetLanguageHeader())
+		h.Set("Accept-Encoding", "identity")
+		h.Set("Connection", "keep-alive")
+		h.Set("Range", "bytes=0-")
+		req.Header = h
+	} else {
+		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Encoding", "identity")
+		req.Header.Set("Connection", "keep-alive")
+	}
 
 	resp, err := sm.httpClient.Do(req)
 	if err != nil {
@@ -454,12 +470,21 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	}
 	defer resp.Body.Close()
 
-	// Check if response is successful
-	if resp.StatusCode != http.StatusOK {
-		utils.ErrorLog("Upstream returned status %d for stream %s",
-			resp.StatusCode, buffer.streamID)
-		sm.stopStream(buffer.streamID)
-		return
+	// Check if response is successful. For VOD with Range requests, 206 is valid.
+	if isVOD {
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			utils.ErrorLog("Upstream returned status %d for VOD stream %s",
+				resp.StatusCode, buffer.streamID)
+			sm.stopStream(buffer.streamID)
+			return
+		}
+	} else {
+		if resp.StatusCode != http.StatusOK {
+			utils.ErrorLog("Upstream returned status %d for stream %s",
+				resp.StatusCode, buffer.streamID)
+			sm.stopStream(buffer.streamID)
+			return
+		}
 	}
 
 	// Stream data into ring buffer

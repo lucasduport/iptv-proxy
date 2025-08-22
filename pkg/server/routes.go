@@ -20,16 +20,14 @@ package server
 
 import (
 	"fmt"
-	"log"
-	"net/http"
-	"net/url"
 	"path"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
+// routes registers the primary API surface under the configurable custom endpoint.
+// It decides between Xtream-backed endpoints and proxified M3U based on config.
 func (c *Config) routes(r *gin.RouterGroup) {
 	r = r.Group(c.CustomEndpoint)
 
@@ -51,6 +49,7 @@ func (c *Config) routes(r *gin.RouterGroup) {
 	c.m3uRoutes(r)
 }
 
+// xtreamRoutes registers endpoints backed by an Xtream provider.
 func (c *Config) xtreamRoutes(r *gin.RouterGroup) {
 	getphp := gin.HandlerFunc(c.xtreamGet)
 	if c.XtreamGenerateApiGet {
@@ -72,6 +71,7 @@ func (c *Config) xtreamRoutes(r *gin.RouterGroup) {
 	r.GET("/play/:token/:type", c.xtreamStreamPlay)
 }
 
+// m3uRoutes exposes a proxified, credential-rewritten M3U and its track endpoints.
 func (c *Config) m3uRoutes(r *gin.RouterGroup) {
 	r.GET("/"+c.M3UFileName, c.authenticate, c.getM3U)
 	// XXX Private need: for external Android app
@@ -89,43 +89,4 @@ func (c *Config) m3uRoutes(r *gin.RouterGroup) {
 			r.GET(fmt.Sprintf("/%s/%s/%s/%d/%s", c.endpointAntiColision, c.XtreamUser.String(), c.XtreamPassword.String(), i, path.Base(track.URI)), trackConfig.reverseProxy)
 		}
 	}
-}
-
-// InitializeRoutes sets up all the routes for the server
-func (c *Config) InitializeRoutes(r *gin.Engine) {
-	// Standard routes using authentication middleware
-	// ... existing authenticated routes ...
-
-	// Add routes to handle direct streaming with proxy credentials
-	// These routes will map requests with proxy credentials to the proper handlers
-	// that will use the Xtream credentials for upstream requests
-	utils.DebugLog("Setting up direct stream routes with proxy credentials")
-
-	// Handle root level streaming endpoints with proxy credentials
-	r.GET("/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsStreamHandler)
-
-	// Handle live, movie, series endpoints with proxy credentials
-	r.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsLiveStreamHandler)
-	r.GET("/movie/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsMovieStreamHandler)
-	r.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsSeriesStreamHandler)
-
-	// Handle timeshift with proxy credentials
-	r.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
-		duration := ctx.Param("duration")
-		start := ctx.Param("start")
-		id := ctx.Param("id")
-		utils.DebugLog("Timeshift request with proxy credentials: %s/%s/%s", duration, start, id)
-
-		// Use Xtream credentials for upstream request
-		rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s",
-			c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
-		if err != nil {
-			ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-			return
-		}
-
-		c.stream(ctx, rpURL)
-	})
-
-	log.Printf("[stream-share] Routes initialized with direct stream URL support")
 }

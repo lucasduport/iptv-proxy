@@ -14,8 +14,12 @@ StreamShare is a comprehensive IPTV management solution that allows secure shari
   - M3U/M3U8 playlist proxying with credential protection
   - Xtream Codes API compatibility (live, VOD, series, EPG)
   - Robust handling of Unicode characters and malformed responses
+- **VOD Caching and Local Playback**
+  - Cache movies or episodes locally (1–14 days) with progress tracking
+  - Automatically stream from cached content for downloads and VOD/series endpoints when available
 - **User Experience**
-  - Discord bot with embed-based responses for content discovery
+  - Enhanced VOD search, including series episodes (queries like "the office s02e04")
+  - Discord bot with prettier embed-based responses, dropdown selection, and pagination
   - Temporary streaming links for content sharing
   - Session management with configurable timeouts
 - **Administration**
@@ -25,12 +29,6 @@ StreamShare is a comprehensive IPTV management solution that allows secure shari
 - **Deployment**
   - Docker-ready with comprehensive environment variables
   - Reverse proxy compatibility with HTTPS support
-
-
-### Upcoming Features
-- **Enhanced Vod Search** - Improved search capabilities for Video on Demand content
-- **Episode Sorting** - Make sure episodes are well referenced in m3u playlists
-- **VOD Caching** - Cache VOD content for a smooth stream access while someone is already watching
 
 ---
 
@@ -109,38 +107,56 @@ StreamShare includes a powerful Discord bot for content discovery and streaming.
 
 | Command | Description |
 |---------|-------------|
-| `!link <ldap_username>` | Link your Discord account with your LDAP username |
-| `!vod <query>` | Search specifically for VOD content |
-| `!status` | Show server status (admin only) |
-| `!help` | Display available commands |
-| `!disconnect <ldap_username>` | Disconnect user from the stream |
-| `!timeout <ldap_username> <duration>` | Set a timeout for user activity |
+| `/link <ldap_username>` | Link your Discord account with your LDAP username |
+| `/vod <query>` | Search movies and series; supports queries like `show s02e04` |
+| `/cache <title> <days>` | Cache a movie or episode on the server for 1–14 days |
+| `/cached` | List cached items and expiration times |
+| `/status` | Show server status (admin only) |
+| `/help` | Display available commands |
+| `/disconnect <ldap_username>` | Disconnect user from the stream |
+| `/timeout <ldap_username> <duration>` | Set a timeout for user activity |
+
+Tips:
+- Link your account first with `/link <ldap_user>`.
+- Use specific queries to find episodes, e.g. `game of thrones s02e04` or `S1E1`.
 
 ---
 
-## API Documentation
+## API Documentation (Internal)
 
-StreamShare provides a REST API for integration and management:
+StreamShare exposes an internal API (used by the Discord bot and admin tools) under `/api/internal`.
 
 ### Endpoints
 
 | Endpoint | Method | Description | Authentication |
 |----------|--------|-------------|----------------|
-| `/api/status` | GET | Get server status summary | API key |
-| `/api/streams` | GET | List all active streams | API key |
-| `/api/users` | GET | List all connected users | API key |
-| `/api/templink` | POST | Create temporary download link | API key |
-| `/api/search` | GET | Search content | API key |
+| `/api/internal/status` | GET | Get server status summary | X-API-Key |
+| `/api/internal/streams` | GET | List all active streams | X-API-Key |
+| `/api/internal/users` | GET | List all connected users | X-API-Key |
+| `/api/internal/users/:username` | GET | Get details for a user | X-API-Key |
+| `/api/internal/users/disconnect/:username` | POST | Forcibly disconnect a user | X-API-Key |
+| `/api/internal/users/timeout/:username` | POST | Apply a timeout for a user | X-API-Key |
+| `/api/internal/discord/link` | POST | Link a Discord account to an LDAP user | X-API-Key |
+| `/api/internal/discord/:discordid/ldap` | GET | Resolve LDAP username for a Discord ID | X-API-Key |
+| `/api/internal/vod/search` | POST | Enhanced VOD search (movies + series episodes) | X-API-Key |
+| `/api/internal/vod/download` | POST | Create a temporary download link for a VOD item | X-API-Key |
+| `/api/internal/vod/status/:requestid` | GET | Check VOD request status | X-API-Key |
+| `/api/internal/cache/start` | POST | Start caching a movie/episode for N days (1–14) | X-API-Key |
+| `/api/internal/cache/by-stream/:streamid` | GET | Get cache entry by stream ID | X-API-Key |
+| `/api/internal/cache/progress/:streamid` | GET | Get cache download progress | X-API-Key |
+| `/api/internal/cache/list` | GET | List active cache entries | X-API-Key |
 
 ### Authentication
 
 API requests require an API key provided in the `X-API-Key` header:
 
 ```bash
-curl -H "X-API-Key: your_api_key" https://streamshare.example.com/api/status
+curl -H "X-API-Key: your_api_key" https://streamshare.example.com/api/internal/status
 ```
 
 The API key is automatically generated on first run and stored in the database.
+
+To override, set `INTERNAL_API_KEY` in the environment so the bot and integrations can authenticate reliably.
 
 ---
 
@@ -205,8 +221,9 @@ services:
 
       # --- DISCORD BOT ---
       DISCORD_BOT_TOKEN: "your_discord_bot_token"
-      DISCORD_BOT_PREFIX: "!"
       DISCORD_ADMIN_ROLE_ID: "1234567890"
+  # Internal API key used by the bot (optional – auto-generated if unset)
+  # INTERNAL_API_KEY: "set-a-strong-random-key"
       
       # --- DATABASE ---
       DB_HOST: "postgres"
@@ -219,6 +236,8 @@ services:
       GIN_MODE: "release"
       DEBUG_LOGGING: "false"
       CACHE_FOLDER: "/cache"
+  # Prefer specific VOD extensions when resolving (optional)
+  # VOD_EXT_ORDER: "mp4,ts,mkv"
 
     volumes:
       - streamshare_data:/data
@@ -260,6 +279,8 @@ https://streamshare.example.com/series/username/password/12345
 
 These URLs are useful for direct integration with media players and other systems.
 
+When the target movie or series episode is cached and ready, these endpoints serve the local file (with HTTP range support) instead of proxying upstream.
+
 ### Temporary Links
 
 Generate temporary download links that expire after a configurable period:
@@ -268,7 +289,24 @@ Generate temporary download links that expire after a configurable period:
 https://streamshare.example.com/download/a1b2c3d4e5f6
 ```
 
-Temporary links are perfect for sharing VOD content with users who don't have StreamShare accounts.
+Behavior:
+- If the requested VOD is cached and ready, the file is served directly from local storage.
+- Otherwise, the request is proxied from the provider.
+
+Temporary links are perfect for sharing VOD content with users who don't have StreamShare accounts. Control lifetime with `TEMP_LINK_HOURS`.
+
+### VOD Caching
+
+Cache movies or episodes to disk for faster start times and to reduce upstream usage:
+
+- Start a cache from Discord with `/cache <title> <days>` (1–14 days).
+- Track progress and list items with `/cached`.
+- Cached items automatically serve for both downloads and VOD/series streaming endpoints when available.
+
+Configuration:
+- `CACHE_FOLDER` — Absolute path where cached files are stored.
+- `INTERNAL_API_KEY` — API key used by the internal API (Discord bot and tools).
+- `VOD_EXT_ORDER` — Optional comma-separated list to prefer file extensions for VOD (e.g., `mp4,ts,mkv`).
 
 ---
 

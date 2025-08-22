@@ -29,3 +29,11 @@ func GetIPTVUserAgent() string {
 	}
 	return userAgent
 }
+
+// GetLanguageHeader returns the preferred Accept-Language header, defaulting to en_US
+func GetLanguageHeader() string {
+	if v := os.Getenv("ACCEPT_LANGUAGE"); v != "" {
+		return v
+	}
+	return "en_US"
+}

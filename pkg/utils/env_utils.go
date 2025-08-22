@@ -23,6 +23,14 @@ import (
 	"os"
 )
 
+// GetEnvOrDefault returns the environment variable value if set, otherwise the provided default.
+func GetEnvOrDefault(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultValue
+}
+
 // PrintEnv prints the current environment variables
 func PrintEnv() {
 	for _, e := range os.Environ() {

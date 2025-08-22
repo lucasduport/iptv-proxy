@@ -47,7 +47,7 @@ import (
 var defaultProxyfiedM3UPath = filepath.Join(os.TempDir(), uuid.NewV4().String()+".stream-share.m3u")
 var endpointAntiColision = strings.Split(uuid.NewV4().String(), "-")[0]
 
-// Config represent the server configuration
+// Config represents all server dependencies and runtime configuration.
 type Config struct {
 	*config.ProxyConfig
 
@@ -66,7 +66,7 @@ type Config struct {
 	discordBot     *discord.Bot
 }
 
-// NewServer initializes a new server configuration with all necessary components
+// NewServer initializes a new server configuration with all necessary components.
 func NewServer(config *config.ProxyConfig) (*Config, error) {
 	var p m3u.Playlist
 
@@ -151,15 +151,6 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	discordToken := os.Getenv("DISCORD_BOT_TOKEN")
 	if discordToken != "" {
 		utils.InfoLog("Initializing Discord bot")
-		discordPrefix := os.Getenv("DISCORD_BOT_PREFIX")
-		if discordPrefix == "" {
-			discordPrefix = "!"
-		}
-		if strings.HasPrefix(discordPrefix, "/") {
-			utils.WarnLog("Discord prefix is '%s'. Slash prefixes may not trigger classic handlers. Prefer '!'", discordPrefix)
-		} else {
-			utils.InfoLog("Discord bot command prefix: '%s'", discordPrefix)
-		}
 		discordAdminRole := os.Getenv("DISCORD_ADMIN_ROLE_ID")
 
 		// Get API URL from config, defaulting to localhost
@@ -174,13 +165,12 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.InfoLog("Discord API URL used by bot: %s", apiURL)
 		utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in Discord Developer Portal for this bot.")
 
-		bot, err := discord.NewBot(discordToken, discordPrefix, discordAdminRole, apiURL, GetAPIKey())
+		bot, err := discord.NewBot(discordToken, discordAdminRole, apiURL, GetAPIKey())
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize Discord bot: %w", err)
 		}
 
 		serverConfig.discordBot = bot
-		utils.InfoLog("Discord bot initialized with prefix %s", discordPrefix)
 	} else {
 		utils.InfoLog("Bootstrap: DISCORD_BOT_TOKEN not set - Discord bot is DISABLED")
 	}
@@ -189,6 +179,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 }
 
 // Serve the stream-share api
+// Serve boots the HTTP server, internal API, routes, and optional Discord bot.
 func (c *Config) Serve() error {
 	utils.InfoLog("[stream-share] Server is starting...")
 
@@ -245,60 +236,22 @@ func (c *Config) Serve() error {
 }
 
 // Add direct streaming routes with proxy credentials
+// addProxyCredentialRoutes registers direct streaming endpoints that accept
+// proxy credentials in the path but always use Xtream credentials upstream.
 func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
 	utils.InfoLog("[stream-share] Setting up direct stream routes with proxy credentials")
 
 	// Root level (generic)
-	router.GET("/:username/:password/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
-		id := ctx.Param("id")
-		utils.DebugLog("Direct stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
-		rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
-		c.multiplexedStream(ctx, rpURL)
-	})
+	router.GET("/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsStreamHandler)
 
 	// Live
-	router.GET("/live/:username/:password/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
-		id := ctx.Param("id")
-		utils.DebugLog("Direct live stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
-		rpURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
-		c.multiplexedStream(ctx, rpURL)
-	})
+	router.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsLiveStreamHandler)
 
 	// Movie
-	router.GET("/movie/:username/:password/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
-		id := ctx.Param("id")
-		utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
-		rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
-		c.multiplexedStream(ctx, rpURL)
-	})
+	router.GET("/movie/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsMovieStreamHandler)
 
 	// Series
-	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
-		id := ctx.Param("id")
-		utils.DebugLog("Direct series stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
-		rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
-		c.multiplexedStream(ctx, rpURL)
-	})
+	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsSeriesStreamHandler)
 
 	// Timeshift
 	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
@@ -320,6 +273,8 @@ func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
 
 // Authentication middleware that checks credentials from URL path parameters
 // and manages user sessions for multiplexing
+// authWithPathCredentials authenticates :username/:password path params against
+// either LDAP (if enabled) or local credentials, and registers the user session.
 func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		username := ctx.Param("username")
@@ -368,6 +323,8 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 }
 
 // handleTemporaryLink processes temporary link downloads
+// handleTemporaryLink serves a previously created temporary link, preferring a
+// local cache hit and falling back to proxying the original upstream URL.
 func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	token := ctx.Param("token")
 
@@ -379,22 +336,29 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 		return
 	}
 
-	// Parse the target URL
-	targetURL, err := url.Parse(tempLink.URL)
-	if err != nil {
-		utils.ErrorLog("Invalid URL in temporary link: %v", err)
-		ctx.AbortWithStatus(http.StatusInternalServerError)
-		return
+	// If cached locally, serve from disk
+	if c.db != nil && tempLink.StreamID != "" {
+		if entry, err := c.db.GetVODCache(tempLink.StreamID); err == nil && entry != nil && entry.Status == "ready" {
+			utils.InfoLog("Download via cache for stream %s -> %s", tempLink.StreamID, entry.FilePath)
+			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
+			ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, tempLink.Title, ext))
+			_ = c.db.TouchVODCache(tempLink.StreamID)
+			ctx.File(entry.FilePath)
+			return
+		}
 	}
 
-	// Add appropriate headers for download
-	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.mp4"`, tempLink.Title))
-
-	// Stream the content to the client
-	c.multiplexedStream(ctx, targetURL)
+	// Fallback: proxy upstream URL
+	targetURL, err := url.Parse(tempLink.URL)
+	if err != nil { utils.ErrorLog("Invalid URL in temporary link: %v", err); ctx.AbortWithStatus(http.StatusInternalServerError); return }
+	ext := strings.ToLower(path.Ext(targetURL.Path)); if ext == "" { ext = ".mp4" }
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, tempLink.Title, ext))
+	c.stream(ctx, targetURL)
 }
 
 // multiplexedStream handles streaming with connection multiplexing
+// multiplexedStream proxies a stream while sharing a single upstream connection
+// across multiple clients for the same content using the SessionManager.
 func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	username := ctx.GetString("username")
 	if username == "" {
@@ -430,6 +394,27 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	utils.DebugLog("Multiplexed stream request: user=%s, id=%s, type=%s, title=%s, upstream=%s",
 		username, streamID, streamType, streamTitle, targetURL.String())
 
+	// If VOD and cached locally, serve from disk to avoid upstream connection
+	if c.db != nil && (streamType == "movie" || streamType == "series") {
+		if entry, err := c.db.GetVODCache(streamID); err == nil && entry != nil && entry.Status == "ready" {
+			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
+				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, streamID, entry.FilePath)
+				// Content-Type based on file extension
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
+					ctx.Header("Content-Type", "video/mp2t")
+				} else if ext == ".mkv" {
+					ctx.Header("Content-Type", "video/x-matroska")
+				} else {
+					ctx.Header("Content-Type", "video/mp4")
+				}
+				_ = c.db.TouchVODCache(streamID)
+				ctx.File(entry.FilePath)
+				return
+			}
+			utils.WarnLog("Multiplex: cached %s missing on disk for stream %s at %s; falling back to upstream", streamType, streamID, entry.FilePath)
+		}
+	}
+
 	if c.sessionManager == nil {
 		utils.ErrorLog("Multiplex: sessionManager is NIL, falling back to direct streaming")
 		c.stream(ctx, targetURL)
@@ -455,24 +440,8 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		return
 	}
 
-	// Set appropriate headers based on content type
-	// ctx.Header("Content-Type", "video/mp4") // Default, may be overridden
-	// Replace with smarter content-type and no-buffering headers
-	contentType := "application/octet-stream"
-	ext := strings.ToLower(path.Ext(targetURL.Path))
-	if strings.Contains(p, "/live/") || ext == ".ts" {
-		contentType = "video/mp2t"
-	} else if ext == ".m3u8" {
-		contentType = "application/vnd.apple.mpegurl"
-	} else if ext == ".mp4" {
-		contentType = "video/mp4"
-	}
-	ctx.Header("Content-Type", contentType)
-	// Disable intermediary buffering and keep connection alive
-	ctx.Header("Cache-Control", "no-store")
-	ctx.Header("Pragma", "no-cache")
-	ctx.Header("Connection", "keep-alive")
-	ctx.Header("X-Accel-Buffering", "no")
+	// Set content-type and disable intermediary buffering
+	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
 
 	// Stream data to the client
 	utils.InfoLog("Starting multiplexed stream for user %s (stream %s)", username, streamID)
@@ -507,6 +476,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	c.sessionManager.RemoveClient(streamID, username)
 }
 
+// playlistInitialization writes a proxified M3U file to disk if a playlist was parsed.
 func (c *Config) playlistInitialization() error {
 	if len(c.playlist.Tracks) == 0 {
 		return nil
@@ -522,6 +492,8 @@ func (c *Config) playlistInitialization() error {
 }
 
 // MarshallInto a *bufio.Writer a Playlist.
+// marshallInto writes the in-memory playlist into an M3U file, rewriting
+// credentials and paths depending on xtream mode.
 func (c *Config) marshallInto(into *os.File, xtream bool) error {
 	filteredTrack := make([]m3u.Track, 0, len(c.playlist.Tracks))
 
@@ -557,6 +529,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 }
 
 // ReplaceURL replace original playlist url by proxy url
+// replaceURL rewrites a track URI to point to this proxy with local credentials.
 func (c *Config) replaceURL(uri string, trackIndex int, xtream bool) (string, error) {
 	oriURL, err := url.Parse(uri)
 	if err != nil {
