@@ -1,21 +1,20 @@
 services:
   stream-share:
     image: lucasduport/stream-share:latest
-    container_name: stream-share
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       # M3U Configuration
       M3U_URL: ""                      # URL or path to M3U file
-      M3U_FILE_NAME: "iptv.m3u"        # Name of the generated M3U file
+      M3U_FILE_NAME: "file.m3u"        # Name of the generated M3U file
       M3U_CACHE_EXPIRATION: "24"       # Cache expiration in hours
 
       # Server Configuration
       PORT: 8080                       # Port to listen on
       ADVERTISED_PORT: 443             # Port to advertise in URLs (for reverse proxy)
       HOSTNAME: ""                     # Hostname to use in URLs
-      GIN_MODE: "release"              # Gin mode (debug or release)
+      GIN_MODE: "release"              # Gin mode (debug or release) - read by Gin automatically if set
       HTTPS: "1"                       # Use HTTPS in generated URLs
       CUSTOM_ENDPOINT: ""              # Custom endpoint path
       CUSTOM_ID: ""                    # Custom ID for URL paths
@@ -32,8 +31,8 @@ services:
       
       # Debug options
       DEBUG_LOGGING: "true"            # Enable debug logging
-      CACHE_FOLDER: "/root/.stream-share/cache"   # Folder to save responses
-      
+      CACHE_FOLDER: "/root"      # Folder to save responses
+
       # LDAP Authentication
       LDAP_ENABLED: "true"             # Enable LDAP authentication
       LDAP_SERVER: ""                  # LDAP server URL (ldap://server:389)
@@ -44,8 +43,7 @@ services:
       LDAP_GROUP_ATTRIBUTE: "memberOf" # LDAP attribute for group membership
       LDAP_REQUIRED_GROUP: "iptv"      # Group required for authentication
 
-      # Database Configuration (Postgres only)
-      DB_TYPE: "postgres"              # Database type: sqlite or postgres
+      # Database Configuration
       DB_HOST: "db"                    # Postgres hostname 
       DB_PORT: "5432"                  # Postgres port
       DB_NAME: "iptvproxy"             # Postgres database name
@@ -53,21 +51,18 @@ services:
       DB_PASSWORD: "iptvproxypass"     # Postgres password
 
       # Discord Bot Configuration
-      DISCORD_BOT_ENABLED: "false"     # Enable Discord bot integration
       DISCORD_BOT_TOKEN: ""            # Discord bot token
       DISCORD_BOT_PREFIX: "!"          # Command prefix for Discord bot
       DISCORD_ADMIN_ROLE_ID: ""        # Discord role ID for admin commands
       DISCORD_API_URL: ""              # API URL for Discord bot (defaults to hostname)
 
       # Multiplexing and Session Management
-      MAX_CONNECTIONS_PER_USER: "1"    # Maximum simultaneous streams per user
       SESSION_TIMEOUT_MINUTES: "30"    # User session timeout in minutes
       STREAM_TIMEOUT_MINUTES: "2"      # Stream timeout (after all users disconnect)
       TEMP_LINK_HOURS: "24"            # Temporary download link expiration in hours
 
     volumes:
-      - iptv_config:/root/.stream-share  # Persistent configuration storage
-      - iptv_data:/data                # Database and other persistent data
+      - ss_config:/root     # Persistent configuration storage (config, state)
 
     depends_on:
       - db
@@ -89,18 +84,18 @@ services:
     #  - "5432:5432"
     
   # Adminer for database management (optional)
-  adminer:
-    image: adminer
-    container_name: stream-share-adminer
-    restart: unless-stopped
-    ports:
-      - "8081:8080"
-    environment:
-      ADMINER_DEFAULT_SERVER: db
-    depends_on:
-      - db
+  # adminer:
+  #   image: adminer
+  #   container_name: stream-share-adminer
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8081:8080"
+  #   environment:
+  #     ADMINER_DEFAULT_SERVER: db
+  #   depends_on:
+  #     - db
 
 volumes:
-  iptv_config:
-  iptv_data:
+  ss_config:
+  ss_data:
   postgres_data:
