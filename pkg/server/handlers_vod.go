@@ -305,12 +305,27 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 		return
 	}
 
-	// Create a proxied download URL
+	// Create a proxied download URL with REVERSE_PROXY behavior
 	protocol := "http"
-	if c.ProxyConfig.HTTPS {
-		protocol = "https"
+	if c.ProxyConfig.HTTPS { protocol = "https" }
+	hostPart := fmt.Sprintf("%s:%d", c.HostConfig.Hostname, c.HostConfig.Port)
+	rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY")))
+	if rev == "1" || rev == "true" || rev == "yes" {
+		// Reverse proxy front: prefer hostname without explicit port.
+		// If DISCORD_API_URL is set, mirror its scheme and host (which may include port if user specified it).
+		if api := strings.TrimSpace(os.Getenv("DISCORD_API_URL")); api != "" {
+			if u, err := url.Parse(api); err == nil {
+				if u.Scheme != "" { protocol = u.Scheme }
+				if u.Host != "" { hostPart = u.Host } else { hostPart = c.HostConfig.Hostname }
+			} else {
+				hostPart = c.HostConfig.Hostname
+			}
+		} else {
+			// No explicit API URL; keep default hostname, no port
+			hostPart = c.HostConfig.Hostname
+		}
 	}
-	downloadURL := fmt.Sprintf("%s://%s/download/%s", protocol, c.HostConfig.Hostname, token)
+	downloadURL := fmt.Sprintf("%s://%s/download/%s", protocol, hostPart, token)
 
 	utils.InfoLog("Created VOD download link for user %s, title: %s, token: %s", req.Username, req.Title, token)
 
@@ -339,14 +354,17 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 		}
 		if len(tmp) > 0 { order = tmp }
 	}
-	client := &http.Client{ Timeout: 5 * time.Second }
+	client := &http.Client{ Timeout: 3 * time.Second }
 	for _, ext := range order {
 		url := fmt.Sprintf("%s/%s/%s/%s/%s%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, streamID, ext)
 		req, _ := http.NewRequestWithContext(context.Background(), "HEAD", url, nil)
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+		req.Header.Set("Accept-Encoding", "identity")
+		req.Header.Set("Accept", "*/*")
 		resp, err := client.Do(req)
 		if err != nil { 
-			utils.DebugLog("VOD probe (HEAD) failed for %s: %v", utils.MaskURL(url), err)
+			// Providers often RST HEAD; keep this low-noise
+			utils.DebugLog("VOD probe skipped/noisy for %s: %v", utils.MaskURL(url), err)
 			continue 
 		}
 		resp.Body.Close()
@@ -356,7 +374,7 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 			return ext
 		}
 		// Some providers return non-standard 461 or block HEAD; try GET range fallback
-		if resp.StatusCode == 461 || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest {
+	if resp.StatusCode == 461 || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest {
 			utils.DebugLog("VOD probe (HEAD) status %d for %s, trying GET range fallback", resp.StatusCode, utils.MaskURL(url))
 			getReq, _ := http.NewRequestWithContext(context.Background(), "GET", url, nil)
 			getReq.Header.Set("User-Agent", utils.GetIPTVUserAgent())
@@ -370,7 +388,7 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 				}
 				utils.DebugLog("VOD probe (GET range) status %d for %s", getResp.StatusCode, utils.MaskURL(url))
 			} else {
-				utils.DebugLog("VOD probe (GET range) error for %s: %v", utils.MaskURL(url), getErr)
+		utils.DebugLog("VOD probe (GET range) noisy for %s: %v", utils.MaskURL(url), getErr)
 			}
 		} else {
 			utils.DebugLog("VOD probe (HEAD) status %d for %s", resp.StatusCode, utils.MaskURL(url))
@@ -461,8 +479,26 @@ func (c *Config) startCache(ctx *gin.Context) {
 	if t == "series" { basePath = "series" }
 	finalID := req.StreamID
 	if path.Ext(finalID) == "" {
-		// Prefer active probe order to ensure a playable container (mp4, ts, mkv)
-		if ext := c.pickVODExtension(nil, basePath, finalID); ext != "" { finalID += ext } else if ext2 := c.findVODExtensionInCache(basePath, finalID); ext2 != "" { finalID += ext2 }
+		// 1) Try to resolve from cached M3U first (movie/series)
+		if ext := c.findVODExtensionInCache(basePath, finalID); ext != "" {
+			utils.DebugLog("Cache: using M3U extension %s for %s", ext, finalID)
+			finalID += ext
+		} else {
+			// 2) Optional: allow network probing only if explicitly enabled
+			probeEnv := strings.ToLower(strings.TrimSpace(os.Getenv("VOD_EXT_PROBE")))
+			if probeEnv == "1" || probeEnv == "true" || probeEnv == "yes" {
+				if ext := c.pickVODExtension(nil, basePath, finalID); ext != "" {
+					utils.DebugLog("Cache: probed extension %s for %s due to VOD_EXT_PROBE", ext, finalID)
+					finalID += ext
+				}
+			}
+			// 3) Still unknown? Use sane defaults without probing
+			if path.Ext(finalID) == "" {
+				def := ".mp4"; if basePath == "series" { def = ".mkv" }
+				utils.DebugLog("Cache: defaulting extension %s for %s", def, finalID)
+				finalID += def
+			}
+		}
 	}
 	upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
 
