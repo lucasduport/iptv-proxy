@@ -1,0 +1,217 @@
+/*
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+ 
+package discord
+
+import (
+    "fmt"
+    "strconv"
+    "strings"
+    "time"
+
+    "github.com/bwmarrin/discordgo"
+    "github.com/lucasduport/stream-share/pkg/types"
+    "github.com/lucasduport/stream-share/pkg/utils"
+)
+
+// handleCache implements: !cache <vod_name> <number_of_days>
+func (b *Bot) handleCache(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+    if len(args) < 2 {
+        b.info(m.ChannelID, "💾 Cache VOD",
+            "Usage: `!cache <vod_name> <number_of_days>`\nExample: `!cache The Matrix 3` or `!cache Game of Thrones S08E03 5`\nNote: days must be < 15.")
+        return
+    }
+    // Extract days (last arg) and query (preceding)
+    daysStr := args[len(args)-1]
+    days, err := strconv.Atoi(daysStr)
+    if err != nil || days <= 0 || days >= 15 {
+        b.warn(m.ChannelID, "⏳ Invalid Days", "Please provide a valid number of days between 1 and 14.")
+        return
+    }
+    query := strings.TrimSpace(strings.Join(args[:len(args)-1], " "))
+    if query == "" { b.warn(m.ChannelID, "💾 Cache VOD", "Provide a title to search."); return }
+
+    // Loading embed
+    loading, _ := s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{Title:"🔎 Searching…", Description: fmt.Sprintf("Looking for `%s`", query), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)})
+
+    // Resolve user
+    ok, resp, err := b.makeAPIRequest("GET", "/discord/"+m.Author.ID+"/ldap", nil)
+    if err != nil || !ok {
+        _ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. ")
+        return
+    }
+    data, _ := resp.(map[string]interface{})
+    ldapUser := getString(data, "ldap_user")
+    if ldapUser == "" { _ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. "); return }
+
+    // Search
+    ok, resp, err = b.makeAPIRequest("POST", "/vod/search", map[string]string{"username": ldapUser, "query": query})
+    if err != nil || !ok { _ = editEmbed(s, loading, colorError, "❌ Search Failed", "Could not complete search."); return }
+    dmap, _ := resp.(map[string]interface{})
+    arr, _ := dmap["results"].([]interface{})
+    if len(arr) == 0 { _ = editEmbed(s, loading, colorInfo, "🔎 No Results", fmt.Sprintf("No results for `%s`.", query)); return }
+
+    // Convert to VODResult list (preserve both movies and series)
+    results := make([]types.VODResult, 0, len(arr))
+    for _, it := range arr {
+        if rm, ok := it.(map[string]interface{}); ok {
+            vr := types.VODResult{
+                ID:         getString(rm, "ID"),
+                Title:      getString(rm, "Title"),
+                Category:   getString(rm, "Category"),
+                Duration:   getString(rm, "Duration"),
+                Year:       getString(rm, "Year"),
+                Rating:     getString(rm, "Rating"),
+                StreamID:   getString(rm, "StreamID"),
+                Size:       getString(rm, "Size"),
+                StreamType: strings.ToLower(getString(rm, "StreamType")),
+                SeriesTitle:getString(rm, "SeriesTitle"),
+            }
+            if v, ok := rm["Season"].(float64); ok { vr.Season = int(v) }
+            if v, ok := rm["Episode"].(float64); ok { vr.Episode = int(v) }
+            results = append(results, vr)
+        }
+    }
+
+    // Build options for select (first page only, then paginate if >25)
+    ctx := &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: fmt.Sprintf("cache:%s (for %dd)", query, days), Results: results, Page: 0, PerPage: 25, Created: time.Now()}
+    // Replace loading message
+    total := len(results); pages := (total+ctx.PerPage-1)/ctx.PerPage; if pages==0{pages=1}
+    start := 0; end := ctx.PerPage; if end>total{end=total}
+    opts := make([]discordgo.SelectMenuOption, 0, end-start)
+    for i:=start;i<end;i++{
+        r := results[i]
+        label := r.Title
+        if r.StreamType=="series" && r.SeriesTitle!="" && r.Episode>0 { label = fmt.Sprintf("%s S%02dE%02d", r.SeriesTitle, r.Season, r.Episode) }
+        if r.Year!="" { label = fmt.Sprintf("%s (%s)", label, r.Year) }
+        if len([]rune(label))>100 { label = string([]rune(label)[:97])+"..." }
+        desc := r.Category
+        if r.Size!="" { if desc!="" { desc += " • " }; desc += r.Size }
+        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: strconv.Itoa(i), Description: desc})
+    }
+    one := 1
+    components := []discordgo.MessageComponent{
+        discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.SelectMenu{CustomID: "vod_select", Placeholder: "Pick to cache…", MinValues: &one, MaxValues: 1, Options: opts} }},
+        discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.Button{Style: discordgo.SecondaryButton, Label: "Prev", CustomID: "vod_prev", Disabled: true}, discordgo.Button{Style: discordgo.SecondaryButton, Label: "Next", CustomID: "vod_next", Disabled: total<=ctx.PerPage} }},
+    }
+    embed := &discordgo.MessageEmbed{Title: "💾 Cache — Select Item", Description: fmt.Sprintf("%d result(s). Days: %d. Use the dropdown.", total, days), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+    embeds := []*discordgo.MessageEmbed{embed}
+    if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: loading.ID, Channel: m.ChannelID, Embeds: &embeds, Components: &components}); err != nil {
+        msg, err2 := b.renderVODInteractiveMessage(s, ctx)
+        if err2 != nil { utils.ErrorLog("Discord: cache render failed: %v", err2); _ = editEmbed(s, loading, colorError, "❌ Error", "Couldn't render results."); return }
+        b.selectLock.Lock(); b.pendingVODSelect[msg.ID] = ctx; b.selectLock.Unlock()
+    } else {
+        b.selectLock.Lock(); b.pendingVODSelect[loading.ID] = ctx; b.selectLock.Unlock()
+    }
+
+    // Hook selection: reuse existing component handler 'vod_select'. We'll detect cache intent by ctx.Query prefix 'cache:'
+}
+
+// In handleInteractionCreate -> case "vod_select" continues to start a download. For caching, detect context.Query prefix and call cache API instead
+func (b *Bot) startVODCacheFromSelection(s *discordgo.Session, channelID, userID string, selected types.VODResult, days int) {
+    // Resolve LDAP
+    ok, resp, err := b.makeAPIRequest("GET", "/discord/"+userID+"/ldap", nil)
+    if err != nil || !ok { b.fail(channelID, "❌ Cache Failed", "Couldn't resolve your account."); return }
+    data, _ := resp.(map[string]interface{})
+    ldapUser := getString(data, "ldap_user")
+    if ldapUser == "" { b.warn(channelID, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. "); return }
+
+    payload := map[string]interface{}{
+        "username": ldapUser,
+        "stream_id": selected.StreamID,
+        "type": selected.StreamType,
+        "title": selected.Title,
+        "series_title": selected.SeriesTitle,
+        "season": selected.Season,
+        "episode": selected.Episode,
+        "days": days,
+    }
+    ok, resp, err = b.makeAPIRequest("POST", "/cache/start", payload)
+    if err != nil || !ok { b.fail(channelID, "❌ Cache Failed", fmt.Sprintf("Couldn't start caching: %v", err)); return }
+    d, _ := resp.(map[string]interface{})
+    sid := getString(d, "stream_id")
+    exp := getString(d, "expires_at")
+    title := selected.Title
+    if selected.SeriesTitle != "" && selected.Episode > 0 { title = fmt.Sprintf("%s — S%02dE%02d %s", selected.SeriesTitle, selected.Season, selected.Episode, selected.EpisodeTitle) }
+    // Initial embed with progress bar
+    embed := &discordgo.MessageEmbed{Title: "💾 Caching", Description: fmt.Sprintf("%s\nExpires: %s\n\n%s", title, exp, renderBar(0, 0)), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+    msg, _ := b.session.ChannelMessageSendEmbed(channelID, embed)
+    if sid == "" { return }
+    // Poll progress for up to 12 hours or until ready/failed
+    deadline := time.Now().Add(12*time.Hour)
+    for time.Now().Before(deadline) {
+        time.Sleep(2*time.Second)
+        ok, resp, err := b.makeAPIRequest("GET", "/cache/progress/"+sid, nil)
+        if err != nil || !ok { continue }
+        dm, _ := resp.(map[string]interface{})
+        status := strings.ToLower(getString(dm, "status"))
+        downloaded := getInt64(dm, "downloaded_bytes")
+        total := getInt64(dm, "total_bytes")
+        percent := int(getInt64(dm, "percent"))
+        bar := renderBar(downloaded, total)
+        if status == "ready" || percent >= 100 {
+            emb := &discordgo.MessageEmbed{Title: "✅ Cache Ready", Description: fmt.Sprintf("%s\nExpires: %s\n\n%s", title, exp, renderBar(total, total)), Color: colorSuccess, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+            _, _ = b.session.ChannelMessageEditEmbed(channelID, msg.ID, emb)
+            break
+        }
+        if status == "failed" {
+            emb := &discordgo.MessageEmbed{Title: "❌ Cache Failed", Description: fmt.Sprintf("%s\nPlease retry later.", title), Color: colorError, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+            _, _ = b.session.ChannelMessageEditEmbed(channelID, msg.ID, emb)
+            break
+        }
+        emb := &discordgo.MessageEmbed{Title: "💾 Caching", Description: fmt.Sprintf("%s\nExpires: %s\n\n%s (%d%%)", title, exp, bar, percent), Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+        _, _ = b.session.ChannelMessageEditEmbed(channelID, msg.ID, emb)
+    }
+}
+
+func getInt64(m map[string]interface{}, k string) int64 {
+    if v, ok := m[k]; ok {
+        switch t := v.(type) {
+        case float64:
+            return int64(t)
+        case int64:
+            return t
+        case int:
+            return int64(t)
+        case string:
+            if n, err := strconv.ParseInt(t, 10, 64); err == nil { return n }
+        }
+    }
+    return 0
+}
+
+// renderBar returns a textual progress bar and bytes summary
+func renderBar(done, total int64) string {
+    // 20 char bar
+    const width = 20
+    var pct int
+    if total > 0 { pct = int((done*100)/total) } else { pct = 0 }
+    if pct > 100 { pct = 100 }
+    filled := (pct * width) / 100
+    if filled > width { filled = width }
+    bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+    var size string
+    if total > 0 {
+        size = fmt.Sprintf("%s/%s", utils.HumanBytes(done), utils.HumanBytes(total))
+    } else if done > 0 {
+        size = fmt.Sprintf("%s", utils.HumanBytes(done))
+    } else {
+        size = "starting…"
+    }
+    return fmt.Sprintf("`[%s]` %d%% — %s", bar, pct, size)
+}

@@ -379,22 +379,23 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 		return
 	}
 
-	// Parse the target URL
-	targetURL, err := url.Parse(tempLink.URL)
-	if err != nil {
-		utils.ErrorLog("Invalid URL in temporary link: %v", err)
-		ctx.AbortWithStatus(http.StatusInternalServerError)
-		return
+	// If cached locally, serve from disk
+	if c.db != nil && tempLink.StreamID != "" {
+		if entry, err := c.db.GetVODCache(tempLink.StreamID); err == nil && entry != nil && entry.Status == "ready" {
+			utils.InfoLog("Download via cache for stream %s -> %s", tempLink.StreamID, entry.FilePath)
+			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
+			ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, tempLink.Title, ext))
+			_ = c.db.TouchVODCache(tempLink.StreamID)
+			ctx.File(entry.FilePath)
+			return
+		}
 	}
 
-	// Pick filename extension from upstream when available (default mp4)
-	ext := strings.ToLower(path.Ext(targetURL.Path))
-	if ext == "" { ext = ".mp4" }
-	// Add appropriate headers for download
+	// Fallback: proxy upstream URL
+	targetURL, err := url.Parse(tempLink.URL)
+	if err != nil { utils.ErrorLog("Invalid URL in temporary link: %v", err); ctx.AbortWithStatus(http.StatusInternalServerError); return }
+	ext := strings.ToLower(path.Ext(targetURL.Path)); if ext == "" { ext = ".mp4" }
 	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, tempLink.Title, ext))
-
-	// For downloads, use direct proxy to preserve Content-Length and allow
-	// browser to show accurate remaining time instead of "Unknown time left".
 	c.stream(ctx, targetURL)
 }
 
@@ -433,6 +434,27 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 
 	utils.DebugLog("Multiplexed stream request: user=%s, id=%s, type=%s, title=%s, upstream=%s",
 		username, streamID, streamType, streamTitle, targetURL.String())
+
+	// If VOD and cached locally, serve from disk to avoid upstream connection
+	if c.db != nil && (streamType == "movie" || streamType == "series") {
+		if entry, err := c.db.GetVODCache(streamID); err == nil && entry != nil && entry.Status == "ready" {
+			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
+				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, streamID, entry.FilePath)
+				// Content-Type based on file extension
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
+					ctx.Header("Content-Type", "video/mp2t")
+				} else if ext == ".mkv" {
+					ctx.Header("Content-Type", "video/x-matroska")
+				} else {
+					ctx.Header("Content-Type", "video/mp4")
+				}
+				_ = c.db.TouchVODCache(streamID)
+				ctx.File(entry.FilePath)
+				return
+			}
+			utils.WarnLog("Multiplex: cached %s missing on disk for stream %s at %s; falling back to upstream", streamType, streamID, entry.FilePath)
+		}
+	}
 
 	if c.sessionManager == nil {
 		utils.ErrorLog("Multiplex: sessionManager is NIL, falling back to direct streaming")

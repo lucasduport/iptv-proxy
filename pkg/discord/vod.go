@@ -140,6 +140,66 @@ func (b *Bot) handleShow(s *discordgo.Session, m *discordgo.MessageCreate, args 
     }
 }
 
+// handleCachedList shows current cached items with time until expiry
+func (b *Bot) handleCachedList(s *discordgo.Session, m *discordgo.MessageCreate) {
+	ok, resp, err := b.makeAPIRequest("GET", "/cache/list", nil)
+	if err != nil || !ok {
+		b.fail(m.ChannelID, "❌ Cache List Failed", "Couldn't fetch cached items.")
+		return
+	}
+	arr, _ := resp.([]interface{})
+	if len(arr) == 0 {
+		b.info(m.ChannelID, "💾 Cached Items", "No active cached items.")
+		return
+	}
+	const per = 10
+	pages := (len(arr)+per-1)/per
+	for p := 0; p < pages; p++ {
+		start := p*per
+		end := start+per
+		if end > len(arr) { end = len(arr) }
+		lines := make([]string, 0, end-start)
+		for _, it := range arr[start:end] {
+			mapp, _ := it.(map[string]interface{})
+			typ := getString(mapp, "type")
+			title := strings.TrimSpace(getString(mapp, "title"))
+			if typ == "series" {
+				st := getString(mapp, "series_title")
+				if strings.TrimSpace(st) != "" { title = st }
+				if title == "" { title = "Series" }
+				season := int(getInt64(mapp, "season"))
+				episode := int(getInt64(mapp, "episode"))
+				if season > 0 || episode > 0 {
+					title = fmt.Sprintf("%s S%02dE%02d", title, season, episode)
+				}
+			} else {
+				if title == "" { title = "Unknown title" }
+			}
+			by := strings.TrimSpace(getString(mapp, "requested_by"))
+			leftSecs := int(getInt64(mapp, "time_left_seconds"))
+			// Humanize left: prioritize days, else hours
+			left := "expired"
+			if leftSecs > 0 {
+				days := leftSecs / 86400
+				if days >= 1 {
+					if days == 1 { left = "1 day" } else { left = fmt.Sprintf("%d days", days) }
+				} else {
+					hours := (leftSecs + 3599) / 3600 // round up
+					if hours <= 1 { left = "1 hour" } else { left = fmt.Sprintf("%d hours", hours) }
+				}
+			}
+			// Build line: Title [— by user] — expires in X
+			line := fmt.Sprintf("• %s", title)
+			if by != "" { line += fmt.Sprintf(" — by %s", by) }
+			line += fmt.Sprintf(" — expires in %s", left)
+			lines = append(lines, line)
+		}
+		desc := strings.Join(lines, "\n")
+		if pages > 1 { desc += fmt.Sprintf("\n\nPage %d/%d", p+1, pages) }
+		b.info(m.ChannelID, "💾 Cached Items", desc)
+	}
+}
+
 // inferSeriesFromTitle tries to parse titles like:
 //   "Game of Thrones (MULTI) FHD S07 E05"
 //   "Game of Thrones S08E01 — Winterfell"

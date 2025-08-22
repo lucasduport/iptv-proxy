@@ -80,6 +80,12 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 	api.POST("/vod/download", c.createVODDownload)
 	api.GET("/vod/status/:requestid", c.getVODRequestStatus)
 
+	// Caching endpoints (used by Discord)
+	api.POST("/cache/start", c.startCache)
+	api.GET("/cache/by-stream/:streamid", c.getCacheByStream)
+	api.GET("/cache/progress/:streamid", c.getCacheProgress)
+	api.GET("/cache/list", c.listCache)
+
 	// Status summary for Discord and dashboards
 	api.GET("/status", c.statusSummary)
 

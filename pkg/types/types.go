@@ -132,3 +132,23 @@ type APIResponse struct {
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
 }
+
+// VODCacheEntry tracks cached VOD or series episode stored on disk
+type VODCacheEntry struct {
+	StreamID    string    `json:"stream_id"`
+	Type        string    `json:"type"` // movie or series
+	Title       string    `json:"title,omitempty"`
+	SeriesTitle string    `json:"series_title,omitempty"`
+	Season      int       `json:"season,omitempty"`
+	Episode     int       `json:"episode,omitempty"`
+	FilePath    string    `json:"file_path"`
+	RequestedBy string    `json:"requested_by,omitempty"`
+	// Live progress
+	DownloadedBytes int64     `json:"downloaded_bytes,omitempty"`
+	TotalBytes      int64     `json:"total_bytes,omitempty"`
+	SizeBytes   int64     `json:"size_bytes,omitempty"`
+	Status      string    `json:"status"` // downloading, ready, failed
+	CreatedAt   time.Time `json:"created_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	LastAccess  time.Time `json:"last_access,omitempty"`
+}

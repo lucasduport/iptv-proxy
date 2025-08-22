@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -727,6 +728,26 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
 	id := ctx.Param("id")
+	// Serve from cache if present
+	if c.db != nil {
+		if entry, err := c.db.GetVODCache(id); err == nil && entry != nil && entry.Status == "ready" {
+			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
+				utils.InfoLog("Serving cached movie for %s from %s", id, entry.FilePath)
+				// Set a matching content type based on file extension
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
+					ctx.Header("Content-Type", "video/mp2t")
+				} else if ext == ".mkv" {
+					ctx.Header("Content-Type", "video/x-matroska")
+				} else {
+					ctx.Header("Content-Type", "video/mp4")
+				}
+				c.db.TouchVODCache(id)
+				ctx.File(entry.FilePath)
+				return
+			}
+			utils.WarnLog("Cached movie missing on disk for %s at %s; falling back to upstream", id, entry.FilePath)
+		}
+	}
 	// Always use Xtream credentials for upstream requests
 	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
@@ -740,6 +761,25 @@ func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
 
 func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
 	id := ctx.Param("id")
+	// Serve from cache if present
+	if c.db != nil {
+		if entry, err := c.db.GetVODCache(id); err == nil && entry != nil && entry.Status == "ready" {
+			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
+				utils.InfoLog("Serving cached episode for %s from %s", id, entry.FilePath)
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
+					ctx.Header("Content-Type", "video/mp2t")
+				} else if ext == ".mkv" {
+					ctx.Header("Content-Type", "video/x-matroska")
+				} else {
+					ctx.Header("Content-Type", "video/mp4")
+				}
+				c.db.TouchVODCache(id)
+				ctx.File(entry.FilePath)
+				return
+			}
+			utils.WarnLog("Cached episode missing on disk for %s at %s; falling back to upstream", id, entry.FilePath)
+		}
+	}
 	// Always use Xtream credentials for upstream requests
 	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
@@ -781,6 +821,26 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
 	utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
 
+	// Serve from cache if available
+	if c.db != nil {
+		if entry, err := c.db.GetVODCache(id); err == nil && entry != nil && entry.Status == "ready" {
+			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
+				utils.InfoLog("Serving cached movie (proxy creds path) for %s from %s", id, entry.FilePath)
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
+					ctx.Header("Content-Type", "video/mp2t")
+				} else if ext == ".mkv" {
+					ctx.Header("Content-Type", "video/x-matroska")
+				} else {
+					ctx.Header("Content-Type", "video/mp4")
+				}
+				c.db.TouchVODCache(id)
+				ctx.File(entry.FilePath)
+				return
+			}
+			utils.WarnLog("Cached movie (proxy creds) missing on disk for %s at %s; falling back to upstream", id, entry.FilePath)
+		}
+	}
+
 	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
 		utils.ErrorLog("Failed to parse upstream URL: %v", err)
@@ -793,6 +853,26 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {
 func (c *Config) xtreamProxyCredentialsSeriesStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
 	utils.DebugLog("Direct series stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
+
+	// Serve from cache if available
+	if c.db != nil {
+		if entry, err := c.db.GetVODCache(id); err == nil && entry != nil && entry.Status == "ready" {
+			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
+				utils.InfoLog("Serving cached episode (proxy creds path) for %s from %s", id, entry.FilePath)
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
+					ctx.Header("Content-Type", "video/mp2t")
+				} else if ext == ".mkv" {
+					ctx.Header("Content-Type", "video/x-matroska")
+				} else {
+					ctx.Header("Content-Type", "video/mp4")
+				}
+				c.db.TouchVODCache(id)
+				ctx.File(entry.FilePath)
+				return
+			}
+			utils.WarnLog("Cached episode (proxy creds) missing on disk for %s at %s; falling back to upstream", id, entry.FilePath)
+		}
+	}
 
 	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {

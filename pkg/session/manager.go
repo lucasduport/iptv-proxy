@@ -470,12 +470,21 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	}
 	defer resp.Body.Close()
 
-	// Check if response is successful
-	if resp.StatusCode != http.StatusOK {
-		utils.ErrorLog("Upstream returned status %d for stream %s",
-			resp.StatusCode, buffer.streamID)
-		sm.stopStream(buffer.streamID)
-		return
+	// Check if response is successful. For VOD with Range requests, 206 is valid.
+	if isVOD {
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			utils.ErrorLog("Upstream returned status %d for VOD stream %s",
+				resp.StatusCode, buffer.streamID)
+			sm.stopStream(buffer.streamID)
+			return
+		}
+	} else {
+		if resp.StatusCode != http.StatusOK {
+			utils.ErrorLog("Upstream returned status %d for stream %s",
+				resp.StatusCode, buffer.streamID)
+			sm.stopStream(buffer.streamID)
+			return
+		}
 	}
 
 	// Stream data into ring buffer

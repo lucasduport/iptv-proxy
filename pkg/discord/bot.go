@@ -326,6 +326,10 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		b.handleShow(s, m, args)
 	case "status":
 		b.handleStatus(s, m, args)
+	case "cache":
+		b.handleCache(s, m, args)
+	case "cached":
+		b.handleCachedList(s, m)
 	case "disconnect":
 		b.handleDisconnect(s, m, args)
 	case "timeout":
@@ -571,23 +575,24 @@ func (b *Bot) handleInteractionCreate(s *discordgo.Session, i *discordgo.Interac
 		b.selectLock.RLock(); ctx, ok := b.pendingVODSelect[msgID]; b.selectLock.RUnlock(); if !ok { return }
 		if !b.isSameUser(ctx.UserID, i) { return }
 		data := i.MessageComponentData()
-		if len(data.Values) == 0 {
-			return
-		}
-		idx, err := strconv.Atoi(data.Values[0])
-		if err != nil || idx < 0 || idx >= len(ctx.Results) {
-			return
-		}
+		if len(data.Values) == 0 { return }
+		idx, err := strconv.Atoi(data.Values[0]); if err != nil || idx < 0 || idx >= len(ctx.Results) { return }
 		selected := ctx.Results[idx]
-		// Quickly acknowledge interaction with an ephemeral message and then trigger download
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Flags:   discordgo.MessageFlagsEphemeral,
-				Content: fmt.Sprintf("Starting download for: %s", selected.Title),
-			},
-		})
-		go b.startVODDownloadFromSelection(s, ctx.Channel, ctx.UserID, selected)
+		// Decide mode: download vs cache
+		if strings.HasPrefix(ctx.Query, "cache:") {
+			// Extract days from ctx.Query suffix like "cache:... (for Xd)"
+			days := 1
+			if p := strings.LastIndex(ctx.Query, "for "); p != -1 {
+				var n int
+				fmt.Sscanf(ctx.Query[p:], "for %dd", &n)
+				if n > 0 { days = n }
+			}
+			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: fmt.Sprintf("Caching: %s (days=%d)", selected.Title, days)}})
+			go b.startVODCacheFromSelection(s, ctx.Channel, ctx.UserID, selected, days)
+		} else {
+			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: fmt.Sprintf("Starting download for: %s", selected.Title)}})
+			go b.startVODDownloadFromSelection(s, ctx.Channel, ctx.UserID, selected)
+		}
 	case "show_pick":
 		// User picked a show; render season picker
 		userID := b.interactionUserID(i)
@@ -795,6 +800,8 @@ func (b *Bot) handleHelp(s *discordgo.Session, m *discordgo.MessageCreate) {
 	cmd.WriteString("• `!link <ldap_username>` — Link your Discord account.\n")
 	cmd.WriteString("• `!movie <title>` — Search movies; use the dropdown to pick.\n")
 	cmd.WriteString("• `!show <series>` — Pick a show, then season and episode easily.\n")
+	cmd.WriteString("• `!cache <title> <days>` — Cache a movie or episode on the server for up to 14 days.\n")
+	cmd.WriteString("• `!cached` — List cached items and when they expire.\n")
 	cmd.WriteString("• `!status` — Show active streams and users.\n")
 	cmd.WriteString("• `!help` — Show this help.\n\n")
 
