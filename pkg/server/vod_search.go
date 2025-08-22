@@ -42,6 +42,25 @@ import (
 
 var vodM3UMu sync.Mutex
 
+// lightweight in-memory cache for probed sizes to avoid re-hitting upstream on every search
+var (
+	vodSizeMu    sync.RWMutex
+	vodSizeCache = make(map[string]int64) // key: streamID, value: size in bytes
+)
+
+func getCachedSize(streamID string) (int64, bool) {
+	vodSizeMu.RLock()
+	defer vodSizeMu.RUnlock()
+	sz, ok := vodSizeCache[streamID]
+	return sz, ok
+}
+
+func setCachedSize(streamID string, size int64) {
+	vodSizeMu.Lock()
+	vodSizeCache[streamID] = size
+	vodSizeMu.Unlock()
+}
+
 // searchXtreamVOD searches movies and series using the Xtream API only (no M3U mixing)
 func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 	utils.DebugLog("Searching VOD with query: %s", query)
@@ -77,16 +96,41 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 		}
 	}
 
-	// Best-effort: probe size for first few results to display in Discord
-	// Avoid hammering provider: limit to 10 probes with small timeout
-	maxProbe := 10
+	// Best-effort: probe size for the first page of results to display in Discord dropdown
+	// Avoid hammering provider: cap to 25 (discord select options per page)
+	maxProbe := 25
 	if len(results) < maxProbe {
 		maxProbe = len(results)
 	}
-	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { if len(via) >= 10 { return http.ErrUseLastResponse }; return nil }}
+	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		// Preserve critical headers (Range, UA, Accept, Encoding, Language) across redirects
+		if len(via) >= 10 { return http.ErrUseLastResponse }
+		if len(via) > 0 {
+			prev := via[len(via)-1]
+			for k, vv := range prev.Header {
+				// Clone slices to avoid mutation
+				arr := make([]string, len(vv))
+				copy(arr, vv)
+				req.Header[k] = arr
+			}
+		}
+		return nil
+	}}
+
+	// Prefill from cache when available
+	for i := range results {
+		if sz, ok := getCachedSize(results[i].StreamID); ok && sz > 0 {
+			results[i].SizeBytes = sz
+			results[i].Size = utils.HumanBytes(sz)
+		}
+	}
 	for i := 0; i < maxProbe; i++ {
 		streamID := results[i].StreamID
 		if streamID == "" {
+			continue
+		}
+		// Skip probing if already have size (from cache or prior pass)
+		if results[i].SizeBytes > 0 {
 			continue
 		}
 		// Build Xtream URL by type
@@ -98,21 +142,63 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 		if typ == "series" {
 			basePath = "series"
 		}
-		vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, streamID)
+		// Resolve final ID with extension when missing; many providers require it for range/length
+		finalID := streamID
+		if path.Ext(finalID) == "" {
+			if ext := c.findVODExtensionInCache(basePath, streamID); ext != "" {
+				finalID = finalID + ext
+			} else if basePath == "series" {
+				finalID = finalID + ".mkv"
+			} else {
+				finalID = finalID + ".mp4"
+			}
+		}
+		vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
 		// Prefer GET with Range (providers often block HEAD); allow redirects to capture tokenized location
 		req, _ := http.NewRequest("GET", vodURL, nil)
 		req.Header.Set("Range", "bytes=0-0")
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-		req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Accept-Language", utils.GetLanguageHeader())
+		req.Header.Set("Accept", "*/*")
 		if resp, err := client.Do(req); err == nil {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			// If 3xx with Location, ignore size but this confirms URL is valid
+			// Try Content-Range first (206)
 			if cr := resp.Header.Get("Content-Range"); cr != "" {
 				if total := strings.TrimSpace(cr[strings.LastIndex(cr, "/")+1:]); total != "*" {
 					if sz, perr := parseInt64(total); perr == nil && sz > 0 {
 						results[i].SizeBytes = sz
 						results[i].Size = utils.HumanBytes(sz)
+						setCachedSize(streamID, sz)
+						continue
+					}
+				}
+			}
+			// Fallback to Content-Length when server responded 200 OK without range
+			if cl := resp.Header.Get("Content-Length"); cl != "" {
+				if sz, perr := parseInt64(cl); perr == nil && sz > 0 {
+					results[i].SizeBytes = sz
+					results[i].Size = utils.HumanBytes(sz)
+					setCachedSize(streamID, sz)
+				}
+			}
+			// Final fallback: HEAD request to try and obtain Content-Length on static file URLs
+			if results[i].SizeBytes == 0 {
+				headReq, _ := http.NewRequest("HEAD", vodURL, nil)
+				headReq.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+				headReq.Header.Set("Accept", "*/*")
+				headReq.Header.Set("Accept-Encoding", "identity")
+				headReq.Header.Set("Accept-Language", utils.GetLanguageHeader())
+				if headResp, hErr := client.Do(headReq); hErr == nil {
+					io.Copy(io.Discard, headResp.Body)
+					headResp.Body.Close()
+					if cl := headResp.Header.Get("Content-Length"); cl != "" {
+						if sz, perr := parseInt64(cl); perr == nil && sz > 0 {
+							results[i].SizeBytes = sz
+							results[i].Size = utils.HumanBytes(sz)
+							setCachedSize(streamID, sz)
+						}
 					}
 				}
 			}
@@ -151,7 +237,8 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 		if strings.TrimSpace(streamID) == "" || streamID == "<nil>" { continue }
 		year := fmt.Sprintf("%v", firstNonEmpty(m["releaseDate"], m["release_date"]))
 		rating := fmt.Sprintf("%v", firstNonEmpty(m["rating"], m["vote_average"]))
-		duration := fmt.Sprintf("%v", m["duration"]) // may be empty
+	duration := fmt.Sprintf("%v", m["duration"]) // may be empty; providers sometimes return null -> "<nil>"
+	if duration == "<nil>" { duration = "" }
 		category := fmt.Sprintf("%v", m["category_name"]) // best-effort; some providers only give category_id
 
 		out = append(out, types.VODResult{

@@ -114,8 +114,10 @@ func (b *Bot) handleCache(s *discordgo.Session, m *discordgo.MessageCreate, args
         label := r.Title
         if r.StreamType=="series" && r.SeriesTitle!="" && r.Episode>0 { label = fmt.Sprintf("%s S%02dE%02d", r.SeriesTitle, r.Season, r.Episode) }
         if r.Year!="" { label = fmt.Sprintf("%s (%s)", label, r.Year) }
+        if r.Size != "" { label = fmt.Sprintf("%s — %s", label, r.Size) }
         if len([]rune(label))>100 { label = string([]rune(label)[:97])+"..." }
-        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: strconv.Itoa(i)})
+        desc := buildDescriptionForVOD(r)
+        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: strconv.Itoa(i), Description: desc})
     }
     placeholder := "Pick to cache…"; if pages>1 { placeholder = fmt.Sprintf("Pick to cache… (%d/%d)", 1, pages) }
     components = append(components, discordgo.ActionsRow{Components: []discordgo.MessageComponent{ discordgo.SelectMenu{CustomID: "vod_select", Placeholder: placeholder, MinValues: &one, MaxValues: 1, Options: opts} }})

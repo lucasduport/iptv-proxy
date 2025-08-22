@@ -18,7 +18,10 @@
 
 package utils
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 // GetEnvOrDefault returns the environment variable value if set, otherwise the provided default.
 func GetEnvOrDefault(key, defaultValue string) string {
@@ -26,4 +29,11 @@ func GetEnvOrDefault(key, defaultValue string) string {
 		return v
 	}
 	return defaultValue
+}
+
+// PrintEnv prints the current environment variables
+func PrintEnv() {
+	for _, e := range os.Environ() {
+		fmt.Println(e)
+	}
 }

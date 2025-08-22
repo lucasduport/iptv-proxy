@@ -54,23 +54,19 @@ func NewIntegration() (*Integration, error) {
 	if token == "" {
 		utils.WarnLog("Discord bot token not provided - bot functionality disabled")
 	} else {
-		prefix := os.Getenv("DISCORD_BOT_PREFIX")
-		if prefix == "" {
-			prefix = "!"
-		}
-		adminRole := os.Getenv("DISCORD_ADMIN_ROLE_ID")
-		apiURL := os.Getenv("DISCORD_API_URL")
-		apiKey := os.Getenv("INTERNAL_API_KEY")
+	adminRole := os.Getenv("DISCORD_ADMIN_ROLE_ID")
+	apiURL := os.Getenv("DISCORD_API_URL")
+	apiKey := os.Getenv("INTERNAL_API_KEY")
 		if apiKey == "" {
 			utils.ErrorLog("INTERNAL_API_KEY not set, Discord bot will not be able to communicate with API")
 		}
-		bot, err := NewBot(token, prefix, adminRole, apiURL, apiKey)
+	bot, err := NewBot(token, adminRole, apiURL, apiKey)
 		if err != nil {
 			utils.ErrorLog("Failed to initialize Discord bot: %v", err)
 			return nil, err
 		}
 		integration.Bot = bot
-		utils.InfoLog("Discord bot initialized with prefix '%s'", prefix)
+	utils.InfoLog("Discord bot initialized")
 	}
 
 	integration.initialized = true
@@ -106,7 +102,7 @@ func (i *Integration) Stop() {
 }
 
 // NewBot creates a new Discord bot
-func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
+func NewBot(token, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		return nil, err
@@ -115,7 +111,6 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 	bot := &Bot{
 		session:         dg,
 		token:           token,
-		prefix:          prefix,
 		adminRoleID:     adminRoleID,
 		apiURL:          strings.TrimSuffix(apiURL, "/"),
 		apiKey:          apiKey,
@@ -124,19 +119,23 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 		pendingVODSelect: make(map[string]*vodSelectContext),
 	}
 
+	// Optional: dev guild for registering guild-scoped commands during development
+	bot.devGuildID = os.Getenv("DISCORD_DEV_GUILD_ID")
+
 	// Register handlers
-	dg.AddHandler(bot.messageCreate)
-	// Handle interactions (components)
+	// Legacy messageCreate kept for now but can be removed once slash migration is complete.
+	// Commented out to prioritize slash commands migration.
+	// dg.AddHandler(bot.messageCreate)
+	// Handle interactions (components + application commands)
 	dg.AddHandler(bot.handleInteractionCreate)
+	dg.AddHandler(bot.handleApplicationCommand)
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		// Polished ready log
 		if s != nil && s.State != nil && s.State.User != nil {
-			utils.InfoLog("Discord ready: %s#%s (%s) | Prefix: %s",
-				s.State.User.Username, s.State.User.Discriminator, s.State.User.ID, bot.prefix)
+			utils.InfoLog("Discord ready: %s#%s (%s)", s.State.User.Username, s.State.User.Discriminator, s.State.User.ID)
 		} else {
-			utils.InfoLog("Discord ready: session state not populated yet | Prefix: %s", bot.prefix)
+			utils.InfoLog("Discord ready: session state not populated yet")
 		}
-		utils.WarnLog("Ensure 'MESSAGE CONTENT INTENT' is enabled in the Developer Portal.")
 	})
 
 	// Intents: messages, DMs, message content
@@ -154,12 +153,28 @@ func NewBot(token, prefix, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 // Start starts the Discord bot
 func (b *Bot) Start() error {
 	utils.InfoLog("Starting Discord bot with intents: Guilds, GuildMessages, DirectMessages, MessageContent, Reactions")
-	return b.session.Open()
+	if err := b.session.Open(); err != nil { return err }
+	// Register slash commands once here to avoid duplicate registrations on reconnects
+	utils.InfoLog("Slash commands: registering %s-scoped commands…", func() string { if b.devGuildID != "" { return "guild" } ; return "global" }())
+	if err := b.cleanupExistingCommands(); err != nil {
+		utils.WarnLog("Failed to cleanup existing commands: %v", err)
+	}
+	if err := b.registerSlashCommands(); err != nil {
+		utils.ErrorLog("Failed to register slash commands: %v", err)
+	}
+	if b.devGuildID == "" {
+		utils.WarnLog("Slash commands registered globally; this can take up to 1 hour to appear. Set DISCORD_DEV_GUILD_ID to register instantly in a guild during development.")
+	}
+	return nil
 }
 
 // Stop stops the Discord bot
 func (b *Bot) Stop() {
 	utils.InfoLog("Stopping Discord bot")
+	// Attempt to delete commands (guild-scoped for fast iteration)
+	if err := b.unregisterSlashCommands(); err != nil {
+		utils.WarnLog("Failed to unregister slash commands: %v", err)
+	}
 	b.session.Close()
 }
 

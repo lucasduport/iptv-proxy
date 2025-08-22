@@ -15,7 +15,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
- 
+
 package discord
 
 import (
@@ -26,7 +26,6 @@ import (
 
 // handleDisconnect forcibly disconnects a user (admin only).
 func (b *Bot) handleDisconnect(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-    if !b.hasAdminRole(s, m.GuildID, m.Author.ID) { b.fail(m.ChannelID, "❌ Permission Denied", "You don't have permission to use this command."); return }
     if len(args) != 1 { b.info(m.ChannelID, "🔌 Disconnect User", "Usage: `!disconnect <username>`"); return }
     username := args[0]
     ok, _, err := b.makeAPIRequest("POST", "/users/disconnect/"+username, nil)
@@ -36,7 +35,6 @@ func (b *Bot) handleDisconnect(s *discordgo.Session, m *discordgo.MessageCreate,
 
 // handleTimeout temporarily blocks a user (admin only).
 func (b *Bot) handleTimeout(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-    if !b.hasAdminRole(s, m.GuildID, m.Author.ID) { b.fail(m.ChannelID, "❌ Permission Denied", "You don't have permission to use this command."); return }
     if len(args) != 2 { b.info(m.ChannelID, "⏳ Timeout User", "Usage: `!timeout <username> <minutes>`"); return }
     username := args[0]
     minutes := 0

@@ -151,15 +151,6 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	discordToken := os.Getenv("DISCORD_BOT_TOKEN")
 	if discordToken != "" {
 		utils.InfoLog("Initializing Discord bot")
-		discordPrefix := os.Getenv("DISCORD_BOT_PREFIX")
-		if discordPrefix == "" {
-			discordPrefix = "!"
-		}
-		if strings.HasPrefix(discordPrefix, "/") {
-			utils.WarnLog("Discord prefix is '%s'. Slash prefixes may not trigger classic handlers. Prefer '!'", discordPrefix)
-		} else {
-			utils.InfoLog("Discord bot command prefix: '%s'", discordPrefix)
-		}
 		discordAdminRole := os.Getenv("DISCORD_ADMIN_ROLE_ID")
 
 		// Get API URL from config, defaulting to localhost
@@ -174,13 +165,12 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.InfoLog("Discord API URL used by bot: %s", apiURL)
 		utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in Discord Developer Portal for this bot.")
 
-		bot, err := discord.NewBot(discordToken, discordPrefix, discordAdminRole, apiURL, GetAPIKey())
+		bot, err := discord.NewBot(discordToken, discordAdminRole, apiURL, GetAPIKey())
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize Discord bot: %w", err)
 		}
 
 		serverConfig.discordBot = bot
-		utils.InfoLog("Discord bot initialized with prefix %s", discordPrefix)
 	} else {
 		utils.InfoLog("Bootstrap: DISCORD_BOT_TOKEN not set - Discord bot is DISABLED")
 	}

@@ -52,7 +52,6 @@ services:
 
       # Discord Bot Configuration
       DISCORD_BOT_TOKEN: ""            # Discord bot token
-      DISCORD_BOT_PREFIX: "!"          # Command prefix for Discord bot
       DISCORD_ADMIN_ROLE_ID: ""        # Discord role ID for admin commands
       DISCORD_API_URL: ""              # API URL for Discord bot (defaults to hostname)
 

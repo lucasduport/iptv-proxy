@@ -140,10 +140,12 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
     for i := start; i < end; i++ {
         r := results[i]
         label := buildLabelForVOD(r)
+        if r.Size != "" { label = fmt.Sprintf("%s — %s", label, r.Size) }
         if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
         value := strconv.Itoa(i)
-        // Use single-line options to avoid confusing label+description as two entries
-        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: value})
+    // Add helpful context in description (size and rating only; no duration)
+        desc := buildDescriptionForVOD(r)
+        opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
     }
     placeholder := "Pick a title…"
     if pages > 1 { placeholder = fmt.Sprintf("Pick a title… (%d/%d)", 1, pages) }
