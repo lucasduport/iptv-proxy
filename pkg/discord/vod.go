@@ -124,7 +124,25 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
     total := len(results)
     perPage := 25
     withButtons := total > perPage
-    ctx := &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: query, Results: results, Page: 0, PerPage: perPage, Created: time.Now()}
+    ctx := &vodSelectContext{UserID: m.Author.ID, Channel: m.ChannelID, Query: query, Results: results, Page: 0, PerPage: perPage, Created: time.Now(), EnrichedPages: map[int]bool{}}
+
+    // Enrich only the first page sizes/metadata from server to keep fast responses
+    if len(results) > 0 {
+        payload := map[string]interface{}{"query": query, "results": results, "page": 0, "per_page": perPage}
+        if ok2, resp2, err2 := b.makeAPIRequest("POST", "/vod/enrich", payload); err2 == nil && ok2 {
+            if mp2, _ := resp2.(map[string]interface{}); mp2 != nil {
+                if arr2, _ := mp2["results"].([]interface{}); len(arr2) == len(results) {
+                    // Map back minimal fields we care about (Size/SizeBytes) into our results slice
+                    for i := 0; i < len(results) && i < len(arr2); i++ {
+                        if rm, ok := arr2[i].(map[string]interface{}); ok {
+                            if v, ok := rm["Size"].(string); ok { results[i].Size = v }
+                            if vb, ok := rm["SizeBytes"].(float64); ok { results[i].SizeBytes = int64(vb) }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Prepare current page options across multiple selects
     pages := (total + perPage - 1) / perPage
@@ -143,7 +161,7 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
         if r.Size != "" { label = fmt.Sprintf("%s — %s", label, r.Size) }
         if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
         value := strconv.Itoa(i)
-    // Add helpful context in description (size and rating only; no duration)
+        // Add helpful context in description (size and rating only; no duration)
         desc := buildDescriptionForVOD(r)
         opts = append(opts, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
     }
@@ -157,17 +175,20 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
     embed := &discordgo.MessageEmbed{Title: "🎬 VOD Search Results", Description: desc, Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
     embeds := []*discordgo.MessageEmbed{embed}
     if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: loading.ID, Channel: m.ChannelID, Embeds: &embeds, Components: &components}); err != nil {
-        // Fallback to send new
+        // Fallback to send new without scaring the user; still paginate 25 by 25
         msg, err2 := b.renderVODInteractiveMessage(s, ctx)
         if err2 == nil {
             b.selectLock.Lock(); b.pendingVODSelect[msg.ID] = ctx; b.selectLock.Unlock()
         } else {
-            _ = editEmbed(s, loading, colorWarn, "Too Many Results", fmt.Sprintf("Your search returned %d items, which is too many to display at once. Please refine your query (e.g., add season/episode like `S01E01` or year).", total))
+            // As a last resort, just log; don't show a misleading "too many results" message
+            utils.WarnLog("Discord: failed to render VOD selection: edit=%v send=%v", err, err2)
             return
         }
     } else {
         b.selectLock.Lock(); b.pendingVODSelect[loading.ID] = ctx; b.selectLock.Unlock()
     }
+    // Mark first page as enriched
+    if ctx.EnrichedPages != nil { ctx.EnrichedPages[0] = true }
 }
 
 // Helper to build a concise label for a VODResult

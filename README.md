@@ -107,17 +107,17 @@ StreamShare includes a powerful Discord bot for content discovery and streaming.
 
 | Command | Description |
 |---------|-------------|
-| `!link <ldap_username>` | Link your Discord account with your LDAP username |
-| `!vod <query>` | Search movies and series; supports queries like `show s02e04` |
-| `!cache <title> <days>` | Cache a movie or episode on the server for 1–14 days |
-| `!cached` | List cached items and expiration times |
-| `!status` | Show server status (admin only) |
-| `!help` | Display available commands |
-| `!disconnect <ldap_username>` | Disconnect user from the stream |
-| `!timeout <ldap_username> <duration>` | Set a timeout for user activity |
+| `/link <ldap_username>` | Link your Discord account with your LDAP username |
+| `/vod <query>` | Search movies and series; supports queries like `show s02e04` |
+| `/cache <title> <days>` | Cache a movie or episode on the server for 1–14 days |
+| `/cached` | List cached items and expiration times |
+| `/status` | Show server status (admin only) |
+| `/help` | Display available commands |
+| `/disconnect <ldap_username>` | Disconnect user from the stream |
+| `/timeout <ldap_username> <duration>` | Set a timeout for user activity |
 
 Tips:
-- Link your account first with `!link <ldap_user>`.
+- Link your account first with `/link <ldap_user>`.
 - Use specific queries to find episodes, e.g. `game of thrones s02e04` or `S1E1`.
 
 ---
@@ -221,7 +221,6 @@ services:
 
       # --- DISCORD BOT ---
       DISCORD_BOT_TOKEN: "your_discord_bot_token"
-      DISCORD_BOT_PREFIX: "!"
       DISCORD_ADMIN_ROLE_ID: "1234567890"
   # Internal API key used by the bot (optional – auto-generated if unset)
   # INTERNAL_API_KEY: "set-a-strong-random-key"
@@ -300,8 +299,8 @@ Temporary links are perfect for sharing VOD content with users who don't have St
 
 Cache movies or episodes to disk for faster start times and to reduce upstream usage:
 
-- Start a cache from Discord with `!cache <title> <days>` (1–14 days).
-- Track progress and list items with `!cached`.
+- Start a cache from Discord with `/cache <title> <days>` (1–14 days).
+- Track progress and list items with `/cached`.
 - Cached items automatically serve for both downloads and VOD/series streaming endpoints when available.
 
 Configuration:

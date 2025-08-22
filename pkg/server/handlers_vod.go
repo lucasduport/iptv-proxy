@@ -31,6 +31,8 @@ import (
 	"time"
 	"io"
 	"strconv"
+	"sort"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -110,6 +112,110 @@ func (c *Config) searchVOD(ctx *gin.Context) {
 			"expires_at":    vodRequest.ExpiresAt,
 		},
 	})
+}
+
+// enrichVODPage enriches only the current page of VOD results with metadata that may be slow to compute (e.g., size).
+// It takes the full result list with minimal fields and returns the same list with the specified page enriched.
+func (c *Config) enrichVODPage(ctx *gin.Context) {
+	var req struct {
+		Query   string           `json:"query"`
+		Results []types.VODResult `json:"results"`
+		Page    int              `json:"page"`
+		PerPage int              `json:"per_page"`
+	}
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: "Invalid request: " + err.Error()})
+		return
+	}
+	if req.PerPage <= 0 { req.PerPage = 25 }
+	total := len(req.Results)
+	if total == 0 {
+		ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{"results": req.Results}})
+		return
+	}
+	pages := (total + req.PerPage - 1) / req.PerPage
+	if pages == 0 { pages = 1 }
+	if req.Page < 0 { req.Page = 0 }
+	if req.Page >= pages { req.Page = pages - 1 }
+	start := req.Page * req.PerPage
+	end := start + req.PerPage
+	if end > total { end = total }
+
+	// Build an index of movie streamID -> extension from the cached VOD M3U once
+	extIndex := map[string]string{}
+	if m3uPath, err := c.ensureVODM3UCache(); err == nil {
+		if idx, err2 := parseVODM3UExtensions(m3uPath); err2 == nil { extIndex = idx }
+	}
+	// Shared HTTP client with per-request timeout
+	client := &http.Client{Timeout: 2500 * time.Millisecond, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 { return http.ErrUseLastResponse }
+		if len(via) > 0 { prev := via[len(via)-1]; for k, vv := range prev.Header { arr := make([]string, len(vv)); copy(arr, vv); req.Header[k] = arr } }
+		return nil
+	}}
+
+	// Prefill from cache where available
+	for i := start; i < end; i++ {
+		if sz, ok := getCachedSize(req.Results[i].StreamID); ok && sz > 0 {
+			req.Results[i].SizeBytes = sz
+			req.Results[i].Size = utils.HumanBytes(sz)
+		}
+	}
+	// Probe only current page
+	type job struct{ idx int }
+	count := end - start
+	if count > 0 {
+		jobs := make(chan job, count)
+		var wg sync.WaitGroup
+		mu := sync.Mutex{}
+		workers := 8
+		if workers > count { workers = count }
+		workerFn := func() {
+			defer wg.Done()
+			for j := range jobs {
+				i := j.idx
+				streamID := req.Results[i].StreamID
+				if streamID == "" { continue }
+				if req.Results[i].SizeBytes > 0 { continue }
+				// Build Xtream URL with best-effort extension
+				typ := req.Results[i].StreamType; if typ == "" { typ = "movie" }
+				basePath := "movie"; if typ == "series" { basePath = "series" }
+				finalID := streamID
+				if ext := extIndex[streamID]; ext != "" { finalID += ext } else if path.Ext(finalID) == "" { if basePath == "series" { finalID += ".mkv" } else { finalID += ".mp4" } }
+				vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+				// Range GET
+				reqHTTP, _ := http.NewRequest("GET", vodURL, nil)
+				reqHTTP.Header.Set("Range", "bytes=0-0")
+				reqHTTP.Header.Set("User-Agent", utils.GetIPTVUserAgent())
+				reqHTTP.Header.Set("Accept-Encoding", "identity")
+				reqHTTP.Header.Set("Accept-Language", utils.GetLanguageHeader())
+				reqHTTP.Header.Set("Accept", "*/*")
+				if resp, err := client.Do(reqHTTP); err == nil {
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+					if cr := resp.Header.Get("Content-Range"); cr != "" {
+						if total := strings.TrimSpace(cr[strings.LastIndex(cr, "/")+1:]); total != "*" {
+							if sz, perr := parseInt64(total); perr == nil && sz > 0 {
+								mu.Lock(); req.Results[i].SizeBytes = sz; req.Results[i].Size = utils.HumanBytes(sz); mu.Unlock(); setCachedSize(streamID, sz); continue
+							}
+						}
+					}
+					if cl := resp.Header.Get("Content-Length"); cl != "" {
+						if sz, perr := parseInt64(cl); perr == nil && sz > 0 {
+							mu.Lock(); req.Results[i].SizeBytes = sz; req.Results[i].Size = utils.HumanBytes(sz); mu.Unlock(); setCachedSize(streamID, sz); continue
+						}
+					}
+				}
+			}
+		}
+		for w := 0; w < workers; w++ { wg.Add(1); go workerFn() }
+		for i := start; i < end; i++ { jobs <- job{idx: i} }
+		close(jobs)
+		wg.Wait()
+	}
+
+	// Keep ordering stable for the client
+	sort.SliceStable(req.Results, func(i, j int) bool { return strings.ToLower(req.Results[i].Title) < strings.ToLower(req.Results[j].Title) })
+	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{"results": req.Results}})
 }
 
 // createVODDownload creates a temporary download link for VOD content

@@ -38,14 +38,38 @@ func (b *Bot) handleInteractionCreate(s *discordgo.Session, i *discordgo.Interac
         b.selectLock.RLock(); ctx, ok := b.pendingVODSelect[msgID]; b.selectLock.RUnlock(); if !ok { return }
         if !b.isSameUser(ctx.UserID, i) { return }
         ctx.Page--; if ctx.Page < 0 { ctx.Page = 0 }
-        if err := b.updateVODInteractiveMessage(s, msgID, ctx); err != nil { utils.WarnLog("Discord: failed to update VOD message (prev): %v", err) }
+        // Ack immediately to avoid spinner
         _ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate})
+        // Enrich this page from server if not done yet
+        if ctx.EnrichedPages == nil || !ctx.EnrichedPages[ctx.Page] {
+            payload := map[string]interface{}{"query": ctx.Query, "results": ctx.Results, "page": ctx.Page, "per_page": ctx.PerPage}
+            if ok2, resp2, err2 := b.makeAPIRequest("POST", "/vod/enrich", payload); err2 == nil && ok2 {
+                if mp2, _ := resp2.(map[string]interface{}); mp2 != nil {
+                    if arr2, _ := mp2["results"].([]interface{}); len(arr2) == len(ctx.Results) {
+                        for i := 0; i < len(ctx.Results) && i < len(arr2); i++ { if rm, ok := arr2[i].(map[string]interface{}); ok { if v, ok := rm["Size"].(string); ok { ctx.Results[i].Size = v }; if vb, ok := rm["SizeBytes"].(float64); ok { ctx.Results[i].SizeBytes = int64(vb) } } }
+                        if ctx.EnrichedPages != nil { ctx.EnrichedPages[ctx.Page] = true }
+                    }
+                }
+            }
+        }
+        if err := b.updateVODInteractiveMessage(s, msgID, ctx); err != nil { utils.WarnLog("Discord: failed to update VOD message (prev): %v", err) }
     case "vod_next":
         b.selectLock.RLock(); ctx, ok := b.pendingVODSelect[msgID]; b.selectLock.RUnlock(); if !ok { return }
         if !b.isSameUser(ctx.UserID, i) { return }
         ctx.Page++
-        if err := b.updateVODInteractiveMessage(s, msgID, ctx); err != nil { utils.WarnLog("Discord: failed to update VOD message (next): %v", err) }
         _ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate})
+        if ctx.EnrichedPages == nil || !ctx.EnrichedPages[ctx.Page] {
+            payload := map[string]interface{}{"query": ctx.Query, "results": ctx.Results, "page": ctx.Page, "per_page": ctx.PerPage}
+            if ok2, resp2, err2 := b.makeAPIRequest("POST", "/vod/enrich", payload); err2 == nil && ok2 {
+                if mp2, _ := resp2.(map[string]interface{}); mp2 != nil {
+                    if arr2, _ := mp2["results"].([]interface{}); len(arr2) == len(ctx.Results) {
+                        for i := 0; i < len(ctx.Results) && i < len(arr2); i++ { if rm, ok := arr2[i].(map[string]interface{}); ok { if v, ok := rm["Size"].(string); ok { ctx.Results[i].Size = v }; if vb, ok := rm["SizeBytes"].(float64); ok { ctx.Results[i].SizeBytes = int64(vb) } } }
+                        if ctx.EnrichedPages != nil { ctx.EnrichedPages[ctx.Page] = true }
+                    }
+                }
+            }
+        }
+        if err := b.updateVODInteractiveMessage(s, msgID, ctx); err != nil { utils.WarnLog("Discord: failed to update VOD message (next): %v", err) }
     default:
         // Single select component
         if customID != "vod_select" { return }

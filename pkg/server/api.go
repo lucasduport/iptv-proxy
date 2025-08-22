@@ -77,6 +77,7 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 
 	// VOD search and download endpoints
 	api.POST("/vod/search", c.searchVOD)
+	api.POST("/vod/enrich", c.enrichVODPage)
 	api.POST("/vod/download", c.createVODDownload)
 	api.GET("/vod/status/:requestid", c.getVODRequestStatus)
 

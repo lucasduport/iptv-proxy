@@ -44,11 +44,12 @@ func (b *Bot) renderVODInteractiveMessage(s *discordgo.Session, ctx *vodSelectCo
     options := make([]discordgo.SelectMenuOption, 0, end-start)
     for i := start; i < end; i++ {
         r := ctx.Results[i]
-        label := r.Title
-        if r.Year != "" { label = fmt.Sprintf("%s (%s)", label, r.Year) }
+        label := buildLabelForVOD(r)
+        if r.Size != "" { label = fmt.Sprintf("%s — %s", label, r.Size) }
         if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
         value := strconv.Itoa(i)
-        options = append(options, discordgo.SelectMenuOption{Label: label, Value: value})
+        desc := buildDescriptionForVOD(r)
+        options = append(options, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
     }
     placeholder := "Pick a title…"
     if pages > 1 { placeholder = fmt.Sprintf("Pick a title… (%d/%d)", ctx.Page+1, pages) }
@@ -66,6 +67,7 @@ func (b *Bot) renderVODInteractiveMessage(s *discordgo.Session, ctx *vodSelectCo
     embed := &discordgo.MessageEmbed{Title: "🎬 VOD Search Results", Description: desc, Color: colorInfo, Timestamp: time.Now().UTC().Format(time.RFC3339)}
     msg, err := s.ChannelMessageSendComplex(ctx.Channel, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}, Components: components})
     if err != nil { return nil, err }
+    if ctx.EnrichedPages != nil { ctx.EnrichedPages[ctx.Page] = true }
     return msg, nil
 }
 
@@ -87,11 +89,12 @@ func (b *Bot) updateVODInteractiveMessage(s *discordgo.Session, messageID string
     options := make([]discordgo.SelectMenuOption, 0, end-start)
     for i := start; i < end; i++ {
         r := ctx.Results[i]
-        label := r.Title
-        if r.Year != "" { label = fmt.Sprintf("%s (%s)", label, r.Year) }
+        label := buildLabelForVOD(r)
+        if r.Size != "" { label = fmt.Sprintf("%s — %s", label, r.Size) }
         if len([]rune(label)) > 100 { label = string([]rune(label)[:97]) + "..." }
         value := strconv.Itoa(i)
-        options = append(options, discordgo.SelectMenuOption{Label: label, Value: value})
+        desc := buildDescriptionForVOD(r)
+        options = append(options, discordgo.SelectMenuOption{Label: label, Value: value, Description: desc})
     }
     placeholder := "Pick a title…"
     if pages > 1 { placeholder = fmt.Sprintf("Pick a title… (%d/%d)", ctx.Page+1, pages) }

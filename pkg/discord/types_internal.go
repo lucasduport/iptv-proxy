@@ -57,4 +57,6 @@ type vodSelectContext struct {
     Page    int
     PerPage int
     Created time.Time
+    // Tracks which pages have been enriched (full name, rating, size) to avoid redundant refreshes
+    EnrichedPages map[int]bool
 }
