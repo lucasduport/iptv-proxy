@@ -115,20 +115,7 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
     isVOD := isVODPath(p)
 
     if isVOD {
-        // Start with clean headers and add only known-good ones
-        clean := http.Header{}
-        // Accept
-        if v := ctx.Request.Header.Get("Accept"); v != "" { clean.Set("Accept", v) } else { clean.Set("Accept", "*/*") }
-        // Accept-Language
-        if v := ctx.Request.Header.Get("Accept-Language"); v != "" { clean.Set("Accept-Language", v) } else { clean.Set("Accept-Language", utils.GetLanguageHeader()) }
-        // Range
-        if v := ctx.Request.Header.Get("Range"); v != "" { clean.Set("Range", v) } else { clean.Set("Range", "bytes=0-") }
-        // Connection
-        clean.Set("Connection", "keep-alive")
-        // UA and encoding
-        clean.Set("User-Agent", utils.GetIPTVUserAgent())
-        clean.Set("Accept-Encoding", "identity")
-        req.Header = clean
+        req.Header = prepareVODHeaders(ctx)
     } else {
         // Non-VOD: copy and normalize minimally
         mergeHttpHeader(req.Header, ctx.Request.Header)

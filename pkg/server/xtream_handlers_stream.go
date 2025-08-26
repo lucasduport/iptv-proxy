@@ -19,20 +19,24 @@
 package server
 
 import (
-    "errors"
     "fmt"
     "io/ioutil"
     "net/http"
     "net/url"
     "os"
     "path"
+    "path/filepath"
     "strings"
     "sync"
     "time"
 	"log"
+    "strconv"
+    "io"
+    "errors"
 
     "github.com/gin-gonic/gin"
     "github.com/jamesnetherton/m3u"
+    "github.com/lucasduport/stream-share/pkg/types"
     "github.com/lucasduport/stream-share/pkg/utils"
     xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 )
@@ -166,17 +170,47 @@ func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
     // Normalize DB key: cached entries are stored by bare stream_id without extension
     idRaw := strings.TrimSuffix(id, path.Ext(id))
     if c.db != nil {
-        if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
+        if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
+            // If file exists and is ready, serve locally; if downloading, serve progressively from .part
             if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-                utils.InfoLog("Serving cached movie for %s from %s", idRaw, entry.FilePath)
                 var ct string
                 if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
                 c.db.TouchVODCache(idRaw)
-                serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+                if strings.ToLower(entry.Status) == "ready" {
+                    utils.InfoLog("Serving cached movie for %s from %s", idRaw, entry.FilePath)
+                    serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+                    return
+                }
+                // Progressive serving from growing file
+                utils.InfoLog("Serving progressively from cache (downloading) for %s from %s", idRaw, entry.FilePath)
+                serveGrowingFileRange(ctx, entry.FilePath, ct, "", false, entry.TotalBytes)
                 return
             }
-            utils.WarnLog("Cached movie missing on disk for %s at %s; falling back to upstream", idRaw, entry.FilePath)
         }
+        // Not cached yet: auto-start 7-day caching in background and serve progressively
+        // Determine extension from cached M3U if available, fallback to .mp4
+        basePath := "movie"
+        resolvedExt := c.findVODExtensionInCache(basePath, idRaw)
+        finalID := idRaw
+        if resolvedExt == "" { resolvedExt = ".mp4" }
+        finalID += resolvedExt
+        upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+        cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
+        if cacheDir == "" { cacheDir = filepath.Join(os.TempDir(), "stream-share-cache") }
+        _ = os.MkdirAll(cacheDir, 0o755)
+        dest := filepath.Join(cacheDir, idRaw+resolvedExt)
+        expires := time.Now().Add(7 * 24 * time.Hour)
+        // Insert pending entry
+        _ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "movie", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()})
+        // Start background download only if not already in progress
+        if _, err := os.Stat(dest+".part"); err != nil {
+            go c.fetchToFile(upstream, dest, idRaw, expires)
+        }
+        // Serve progressively from growing file
+        var ct string
+        if ext := strings.ToLower(path.Ext(dest)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
+        serveGrowingFileRange(ctx, dest, ct, "", false, 0)
+        return
     }
     rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
     if err != nil { ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)); return }
@@ -188,17 +222,41 @@ func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
     id := ctx.Param("id")
     idRaw := strings.TrimSuffix(id, path.Ext(id))
     if c.db != nil {
-        if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
+        if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
             if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-                utils.InfoLog("Serving cached episode for %s from %s", idRaw, entry.FilePath)
                 var ct string
                 if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
                 c.db.TouchVODCache(idRaw)
-                serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+                if strings.ToLower(entry.Status) == "ready" {
+                    utils.InfoLog("Serving cached episode for %s from %s", idRaw, entry.FilePath)
+                    serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+                    return
+                }
+                utils.InfoLog("Serving progressively from cache (downloading) for %s from %s", idRaw, entry.FilePath)
+                serveGrowingFileRange(ctx, entry.FilePath, ct, "", false, entry.TotalBytes)
                 return
             }
-            utils.WarnLog("Cached episode missing on disk for %s at %s; falling back to upstream", idRaw, entry.FilePath)
         }
+        // Not cached yet: auto-start 7-day caching in background
+        basePath := "series"
+        resolvedExt := c.findVODExtensionInCache(basePath, idRaw)
+        finalID := idRaw
+        if resolvedExt == "" { resolvedExt = ".mkv" }
+        finalID += resolvedExt
+        upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+        cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
+        if cacheDir == "" { cacheDir = filepath.Join(os.TempDir(), "stream-share-cache") }
+        _ = os.MkdirAll(cacheDir, 0o755)
+        dest := filepath.Join(cacheDir, idRaw+resolvedExt)
+        expires := time.Now().Add(7 * 24 * time.Hour)
+        _ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "series", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()})
+        if _, err := os.Stat(dest+".part"); err != nil {
+            go c.fetchToFile(upstream, dest, idRaw, expires)
+        }
+        var ct string
+        if ext := strings.ToLower(path.Ext(dest)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
+        serveGrowingFileRange(ctx, dest, ct, "", false, 0)
+        return
     }
     rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
     if err != nil { ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)); return }
@@ -227,17 +285,41 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {
     idRaw := strings.TrimSuffix(id, path.Ext(id))
     utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
     if c.db != nil {
-        if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
+        if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
             if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-                utils.InfoLog("Serving cached movie (proxy creds path) for %s from %s", idRaw, entry.FilePath)
                 var ct string
                 if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
                 c.db.TouchVODCache(idRaw)
-                serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+                if strings.ToLower(entry.Status) == "ready" {
+                    utils.InfoLog("Serving cached movie (proxy creds path) for %s from %s", idRaw, entry.FilePath)
+                    serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+                    return
+                }
+                utils.InfoLog("Serving progressively from cache (downloading, proxy creds) for %s from %s", idRaw, entry.FilePath)
+                serveGrowingFileRange(ctx, entry.FilePath, ct, "", false, entry.TotalBytes)
                 return
             }
-            utils.WarnLog("Cached movie (proxy creds) missing on disk for %s at %s; falling back to upstream", idRaw, entry.FilePath)
         }
+        // Auto-start caching and serve progressively
+        basePath := "movie"
+        resolvedExt := c.findVODExtensionInCache(basePath, idRaw)
+        finalID := idRaw
+        if resolvedExt == "" { resolvedExt = ".mp4" }
+        finalID += resolvedExt
+        upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+        cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
+        if cacheDir == "" { cacheDir = filepath.Join(os.TempDir(), "stream-share-cache") }
+        _ = os.MkdirAll(cacheDir, 0o755)
+        dest := filepath.Join(cacheDir, idRaw+resolvedExt)
+        expires := time.Now().Add(7 * 24 * time.Hour)
+        _ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "movie", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()})
+        if _, err := os.Stat(dest+".part"); err != nil {
+            go c.fetchToFile(upstream, dest, idRaw, expires)
+        }
+        var ct string
+        if ext := strings.ToLower(path.Ext(dest)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
+        serveGrowingFileRange(ctx, dest, ct, "", false, 0)
+        return
     }
     rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
     if err != nil { utils.ErrorLog("Failed to parse upstream URL: %v", err); ctx.AbortWithStatus(500); return }
@@ -249,17 +331,40 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandler(ctx *gin.Context) {
     idRaw := strings.TrimSuffix(id, path.Ext(id))
     utils.DebugLog("Direct series stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
     if c.db != nil {
-        if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
+        if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
             if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-                utils.InfoLog("Serving cached episode (proxy creds path) for %s from %s", idRaw, entry.FilePath)
                 var ct string
                 if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
                 c.db.TouchVODCache(idRaw)
-                serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+                if strings.ToLower(entry.Status) == "ready" {
+                    utils.InfoLog("Serving cached episode (proxy creds path) for %s from %s", idRaw, entry.FilePath)
+                    serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+                    return
+                }
+                utils.InfoLog("Serving progressively from cache (downloading, proxy creds) for %s from %s", idRaw, entry.FilePath)
+                serveGrowingFileRange(ctx, entry.FilePath, ct, "", false, entry.TotalBytes)
                 return
             }
-            utils.WarnLog("Cached episode (proxy creds) missing on disk for %s at %s; falling back to upstream", idRaw, entry.FilePath)
         }
+        basePath := "series"
+        resolvedExt := c.findVODExtensionInCache(basePath, idRaw)
+        finalID := idRaw
+        if resolvedExt == "" { resolvedExt = ".mkv" }
+        finalID += resolvedExt
+        upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+        cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
+        if cacheDir == "" { cacheDir = filepath.Join(os.TempDir(), "stream-share-cache") }
+        _ = os.MkdirAll(cacheDir, 0o755)
+        dest := filepath.Join(cacheDir, idRaw+resolvedExt)
+        expires := time.Now().Add(7 * 24 * time.Hour)
+        _ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "series", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()})
+        if _, err := os.Stat(dest+".part"); err != nil {
+            go c.fetchToFile(upstream, dest, idRaw, expires)
+        }
+        var ct string
+        if ext := strings.ToLower(path.Ext(dest)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
+        serveGrowingFileRange(ctx, dest, ct, "", false, 0)
+        return
     }
     rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
     if err != nil { utils.ErrorLog("Failed to parse upstream URL: %v", err); ctx.AbortWithStatus(500); return }
@@ -376,4 +481,193 @@ func getHlsRedirectURL(channel string) (*url.URL, error) {
     u, ok := hlsChannelsRedirectURL[channel+".m3u8"]
     if !ok { return nil, utils.PrintErrorAndReturn(errors.New("HSL redirect url not found")) }
     return &u, nil
+}
+
+
+// serveGrowingFileRange serves a locally growing file (.part) with HTTP Range support.
+// It waits for the file to appear and grow as needed to fulfill the requested range.
+// If a completed file exists, it behaves like serveLocalFileRange.
+// totalSize may be 0 if unknown; when known, it will be used in Content-Range.
+func serveGrowingFileRange(ctx *gin.Context, filePath string, contentType string, filename string, asAttachment bool, totalSize int64) {
+    // Resolve actual path (prefer .part if exists)
+    partPath := filePath + ".part"
+    pathToOpen := filePath
+    if st, err := os.Stat(partPath); err == nil && !st.IsDir() {
+        pathToOpen = partPath
+    } else if st, err := os.Stat(filePath); err == nil && !st.IsDir() {
+        pathToOpen = filePath
+        if totalSize == 0 { totalSize = st.Size() }
+    } else {
+        // Wait briefly for writer to create the .part file
+        deadline := time.Now().Add(3 * time.Second)
+        for time.Now().Before(deadline) {
+            if st, err := os.Stat(partPath); err == nil && !st.IsDir() { pathToOpen = partPath; break }
+            time.Sleep(100 * time.Millisecond)
+        }
+    }
+
+    // Open file
+    f, err := os.Open(pathToOpen)
+    if err != nil {
+        // As last resort, 404
+        ctx.Status(http.StatusNotFound)
+        return
+    }
+    defer f.Close()
+
+    // Determine dynamic size getter
+    getSize := func() int64 {
+        if st, err := f.Stat(); err == nil { return st.Size() }
+        return 0
+    }
+
+    // Common headers
+    if contentType == "" { contentType = contentTypeForPath(pathToOpen) }
+    ctx.Header("Content-Type", contentType)
+    ctx.Header("Accept-Ranges", "bytes")
+    ctx.Header("X-Accel-Buffering", "no")
+    if asAttachment {
+        if filename == "" { filename = path.Base(filePath) }
+        ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+    }
+
+    // HEAD handling: honor Range if provided using current size
+    if ctx.Request.Method == http.MethodHead {
+        sizeNow := getSize()
+        rng := ctx.GetHeader("Range")
+        if rng == "" {
+            if totalSize > 0 { ctx.Header("Content-Length", strconv.FormatInt(totalSize, 10)) } else { ctx.Header("Content-Length", strconv.FormatInt(sizeNow, 10)) }
+            ctx.Status(http.StatusOK)
+            return
+        }
+        if start, end, ok := parseRange(rng, max64(totalSize, sizeNow)); ok {
+            // Clamp end to available if total unknown
+            if totalSize == 0 {
+                sizeNow = getSize()
+                if end >= sizeNow { end = sizeNow - 1 }
+            }
+            length := end - start + 1
+            tot := totalSize
+            if tot == 0 { tot = getSize() }
+            ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, tot))
+            ctx.Header("Content-Length", strconv.FormatInt(length, 10))
+            ctx.Status(http.StatusPartialContent)
+            return
+        }
+        ctx.Header("Content-Range", fmt.Sprintf("bytes */%d", max64(totalSize, sizeNow)))
+        ctx.Status(http.StatusRequestedRangeNotSatisfiable)
+        return
+    }
+
+    // GET with optional Range
+    rng := ctx.GetHeader("Range")
+    if rng == "" {
+        // Progressive full-stream: do not set Content-Length to allow chunked transfer
+        ctx.Status(http.StatusOK)
+        // Start from offset 0 and stream as file grows
+        var offset int64 = 0
+        buf := make([]byte, 256*1024)
+        for {
+            // Ensure reader is at current offset
+            if cur, _ := f.Seek(0, io.SeekCurrent); cur != offset {
+                if _, err := f.Seek(offset, io.SeekStart); err != nil { return }
+            }
+            n, _ := f.Read(buf)
+            if n > 0 {
+                if _, werr := ctx.Writer.Write(buf[:n]); werr != nil { return }
+                offset += int64(n)
+                // Flush when possible
+                if fl, ok := ctx.Writer.(http.Flusher); ok { fl.Flush() }
+                continue
+            }
+            // EOF: check if file is still growing
+            // If .part still exists, wait for more data
+            if _, err2 := os.Stat(partPath); err2 == nil {
+                // Wait a bit for more data
+                select {
+                case <-ctx.Request.Context().Done():
+                    return
+                case <-time.After(200 * time.Millisecond):
+                    continue
+                }
+            }
+            // No .part: finished file
+            return
+        }
+    }
+
+    // Range request
+    // Determine available length now (use totalSize if known for parsing upper-bound)
+    sizeNow := getSize()
+    parseBase := max64(totalSize, sizeNow)
+    // Use a relaxed large upper bound at parse-time to extract start/end even when file is empty
+    relaxedBase := parseBase
+    if relaxedBase == 0 { relaxedBase = 1 << 60 }
+    start, end, ok := parseRange(rng, relaxedBase)
+    if !ok {
+        ctx.Header("Content-Range", fmt.Sprintf("bytes */%d", parseBase))
+        ctx.Status(http.StatusRequestedRangeNotSatisfiable)
+        return
+    }
+    // If requested start or end goes beyond available bytes, wait for growth (only when .part exists)
+    for {
+        sizeNow = getSize()
+        if start < sizeNow && end < sizeNow { break }
+        // If no longer downloading, clamp end
+        if _, err := os.Stat(partPath); err != nil {
+            if sizeNow == 0 || start >= sizeNow {
+                ctx.Header("Content-Range", fmt.Sprintf("bytes */%d", sizeNow))
+                ctx.Status(http.StatusRequestedRangeNotSatisfiable)
+                return
+            }
+            if end >= sizeNow { end = sizeNow - 1 }
+            break
+        }
+        // Still downloading; wait for more data or cancel
+        select {
+        case <-ctx.Request.Context().Done():
+            return
+        case <-time.After(150 * time.Millisecond):
+        }
+    }
+
+    // Ready to serve the requested (possibly clamped) range
+    length := end - start + 1
+    if _, err := f.Seek(start, io.SeekStart); err != nil { ctx.Status(http.StatusInternalServerError); return }
+    tot := totalSize
+    if tot == 0 { tot = max64(totalSize, getSize()) }
+    ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, tot))
+    ctx.Header("Content-Length", strconv.FormatInt(length, 10))
+    ctx.Status(http.StatusPartialContent)
+
+    // Stream exactly length bytes; tolerate short reads by waiting while downloading
+    var remaining = length
+    buf := make([]byte, 256*1024)
+    for remaining > 0 {
+        toRead := int64(len(buf))
+        if remaining < toRead { toRead = remaining }
+        n, err := f.Read(buf[:toRead])
+        if n > 0 {
+            if _, werr := ctx.Writer.Write(buf[:n]); werr != nil { return }
+            remaining -= int64(n)
+            if fl, ok := ctx.Writer.(http.Flusher); ok { fl.Flush() }
+            continue
+        }
+        if err == io.EOF || err == io.ErrUnexpectedEOF {
+            // If still downloading, wait and retry
+            if _, statErr := os.Stat(partPath); statErr == nil {
+                select {
+                case <-ctx.Request.Context().Done():
+                    return
+                case <-time.After(150 * time.Millisecond):
+                    continue
+                }
+            }
+            // Not downloading anymore: stop
+            return
+        }
+        if err != nil {
+            return
+        }
+    }
 }

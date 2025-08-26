@@ -28,10 +28,28 @@ import (
     "strconv"
 
     "github.com/gin-gonic/gin"
+    "github.com/lucasduport/stream-share/pkg/utils"
 )
 
 // isVODPath reports whether the given URL path likely targets VOD content
 // (movie or series) based on known path segments or file extensions.
+// prepareVODHeaders returns a clean set of headers for strict VOD providers.
+func prepareVODHeaders(ctx *gin.Context) http.Header {
+    clean := http.Header{}
+    // Accept
+    if v := ctx.Request.Header.Get("Accept"); v != "" { clean.Set("Accept", v) } else { clean.Set("Accept", "*/*") }
+    // Accept-Language
+    if v := ctx.Request.Header.Get("Accept-Language"); v != "" { clean.Set("Accept-Language", v) } else { clean.Set("Accept-Language", utils.GetLanguageHeader()) }
+    // Range
+    if v := ctx.Request.Header.Get("Range"); v != "" { clean.Set("Range", v) } else { clean.Set("Range", "bytes=0-") }
+    // Connection
+    clean.Set("Connection", "keep-alive")
+    // UA and encoding
+    clean.Set("User-Agent", utils.GetIPTVUserAgent())
+    clean.Set("Accept-Encoding", "identity")
+    return clean
+}
+
 func isVODPath(p string) bool {
     lp := strings.ToLower(p)
     if strings.Contains(lp, "/movie/") || strings.Contains(lp, "/series/") {
@@ -229,3 +247,5 @@ func parseRange(h string, size int64) (int64, int64, bool) {
     if end >= size { end = size - 1 }
     return start, end, true
 }
+
+func max64(a, b int64) int64 { if a > b { return a } ; return b }
